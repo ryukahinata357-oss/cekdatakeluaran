@@ -264,15 +264,16 @@ async function scrapeSite(baseUrl, canonicalMarketId, siteMapping, allSiteMappin
             const dayNorm = dayRaw.toLowerCase().replace(/\s+/g, '');
             const dateNorm = normalizeDate(dateRaw);
 
+            // ✅ GANTI DENGAN INI AGAR SYNTAX BENAR & SUPPORT 4D/5D
             if (dayNorm && dateNorm && prize && (prize.length === 4 || prize.length === 5) && !seenDates.has(dateNorm)) {
-        seenDates.add(dateNorm);
-        results.push({ day: dayNorm, date: dateNorm, prize });
-    }
-// }
+                seenDates.add(dateNorm);
+                results.push({ day: dayNorm, date: dateNorm, prize });
+            }
+        } // <--- Kurung kurawal ini MENUTUP loop 'while'
 
         return { success: true, data: results };
 
-    } catch (err) {
+    } catch (err) { // <--- Sekarang 'catch' punya pasangan 'try' yang valid
         return { 
             success: false, 
             error: err.response?.status === 419 ? 'CSRF Expired' : err.message 
