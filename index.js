@@ -36,7 +36,6 @@ const MARKETS = [
     { id: '64', name: 'Oslo' }
 ];
 
-// Helper Functions
 const fixUrl = (raw) => {
     if (!raw) return null;
     let url = raw.trim().replace(/\/+$/, '');
@@ -44,15 +43,11 @@ const fixUrl = (raw) => {
 };
 
 // ==========================================
-// CORE ENGINE: SESSION-AWARE LIVEWIRE SCRAPING
-// Mengatasi Error 419 dengan Cookie Jar & Referer Header
+// SESSION-AWARE LIVEWIRE SCRAPING ENGINE
 // ==========================================
 async function scrapeSite(baseUrl, marketId) {
     try {
         const fixedBase = fixUrl(baseUrl);
-        
-        // 1. BUAT COOKIE JAR & AXIOS INSTANCE KHUSUS UNTUK SITUS INI
-        // Ini kuncinya! Cookie dari GET akan otomatis dipakai di POST
         const jar = new CookieJar();
         const agent = new HttpsCookieAgent({ cookies: { jar } });
         
@@ -65,18 +60,15 @@ async function scrapeSite(baseUrl, marketId) {
             timeout: 15000
         });
 
-        // 2. LANGKAH 1: GET HALAMAN UTAMA (Mendapatkan Cookie & Token Segar)
+        // Step 1: Get Fresh Session & Token
         const initRes = await client.get(`${fixedBase}/data-keluaran`);
         const $init = cheerio.load(initRes.data);
-        
         const csrfToken = $init('meta[name="csrf-token"]').attr('content');
         const rawSnapshot = $init('[wire\\:id]').first().attr('wire:snapshot');
         
-        if (!csrfToken || !rawSnapshot) {
-            return { success: false, error: 'Gagal mengambil token/snapshot awal' };
-        }
+        if (!csrfToken || !rawSnapshot) return { success: false, error: 'Gagal ambil token/snapshot' };
 
-        // 3. LANGKAH 2: POST KE LIVEWIRE (Cookie & Token sudah tersinkronisasi otomatis)
+        // Step 2: Post Livewire Update
         const payload = {
             _token: csrfToken,
             components: [{
@@ -91,23 +83,19 @@ async function scrapeSite(baseUrl, marketId) {
                 'Content-Type': 'application/json',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json',
-                'Referer': `${fixedBase}/data-keluaran?market=${marketId}` // Header wajib!
+                'Referer': `${fixedBase}/data-keluaran?market=${marketId}`
             }
         });
 
-        // 4. PARSE HTML DARI RESPONSE UPDATE
+        // Step 3: Parse HTML Response
         const htmlContent = updateRes.data.components[0].effects.html;
         const $ = cheerio.load(htmlContent);
         const results = [];
 
         $('div.flex.overflow-hidden.border.rounded-lg').each((i, el) => {
             const cols = $(el).find('div');
-            
             if (cols.length >= 5) {
-                // Ekstrak Prize via tag <b> sesuai struktur HTML Livewire
                 let prize = $(cols[3]).find('b').text().trim();
-                
-                // Fallback regex jika tag <b> kosong/rusak
                 if (!prize || prize.length !== 4) {
                     const match = $(cols[3]).text().match(/\d{4}/);
                     prize = match ? match[0] : '';
@@ -123,120 +111,145 @@ async function scrapeSite(baseUrl, marketId) {
         });
 
         return { success: true, data: results };
-
     } catch (err) {
         return { 
             success: false, 
-            error: err.response?.status === 419 ? 'CSRF Expired/Cookie Invalid' : err.message 
+            error: err.response?.status === 419 ? 'CSRF Expired' : err.message 
         };
     }
 }
 
 // ==========================================
-// ENDPOINT UTAMA: /scan-chain
+// MAJORITY VOTE VALIDATION ENGINE
 // ==========================================
-app.get('/scan-chain', async (req, res) => {
-    const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5].filter(Boolean);
+function validateWithMajorityVote(marketName, siteResults) {
+    const issues = [];
     
-    if (urls.length < 2) {
-        return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan (?url1=...&url2=...)' });
-    }
+    // Kumpulkan semua tanggal unik dari semua situs yang berhasil fetch
+    const allDates = new Set();
+    siteResults.forEach((res, idx) => {
+        if (res.success) {
+            res.data.forEach(item => allDates.add(item.date));
+        }
+    });
 
-    // Generate Chain Pairs: 1vs2, 2vs3, ..., Lastvs1
-    const chainPairs = [];
-    for (let i = 0; i < urls.length; i++) {
-        const nextIndex = (i + 1) % urls.length;
-        chainPairs.push({ 
-            siteA: i + 1, 
-            siteB: nextIndex + 1, 
-            urlA: urls[i], 
-            urlB: urls[nextIndex] 
-        });
-    }
+    // Validasi setiap tanggal secara independen
+    for (const date of allDates) {
+        // Ambil data dari setiap situs untuk tanggal ini
+        const entries = siteResults.map((res, idx) => ({
+            siteNum: idx + 1,
+            success: res.success,
+            item: res.success ? res.data.find(d => d.date === date) : null
+        }));
 
-    console.log(`🔗 Chain Scan Started | ${urls.length} sites → ${chainPairs.length} links × 64 markets`);
-    const startTime = Date.now();
-    const allIssues = [];
+        const presentSites = entries.filter(e => e.item);
+        const missingSites = entries.filter(e => !e.item && e.success);
+        const failedSites = entries.filter(e => !e.success);
 
-    // LOOP SEQUENTIAL PER MARKET (Aman dari rate-limit LiteSpeed)
-    for (const market of MARKETS) {
-        console.log(`   Checking Market: ${market.name} (${market.id})...`);
-
-        // 1. Fetch SEMUA SITUS SECARA PARALEL untuk market ini
-        const siteResults = await Promise.all(
-            urls.map(url => scrapeSite(url, market.id))
-        );
-
-        // 2. Cek SETIAP LINK DALAM RANTAI
-        for (const pair of chainPairs) {
-            const resultA = siteResults[pair.siteA - 1];
-            const resultB = siteResults[pair.siteB - 1];
-            const pairLabel = `Site${pair.siteA} ↔ Site${pair.siteB}`;
-
-            // Handle Fetch Error
-            if (!resultA.success || !resultB.success) {
-                allIssues.push({
-                    market: market.name,
-                    pair: pairLabel,
+        // SKENARIO 1: Ada situs yang gagal fetch total
+        if (failedSites.length > 0) {
+            failedSites.forEach(fs => {
+                issues.push({
+                    market: marketName,
+                    date: date,
+                    culprit: `Site${fs.siteNum}`,
                     status: 'FETCH_FAILED',
-                    detail: `Site${pair.siteA}: ${resultA.error || 'OK'} | Site${pair.siteB}: ${resultB.error || 'OK'}`
+                    detail: `Site${fs.siteNum} gagal mengambil data (Error/Timeout)`
                 });
-                continue;
-            }
+            });
+            continue; 
+        }
 
-            // STRICT COMPARISON: Cek setiap baris data
-            resultA.data.forEach(itemA => {
-                const itemB = resultB.data.find(b => b.date === itemA.date);
-                
-                if (!itemB) {
-                    allIssues.push({
-                        market: market.name,
-                        date: itemA.date,
-                        pair: pairLabel,
-                        status: 'DATA_MISSING',
-                        detail: `Data tanggal ${itemA.date} ADA di Site${pair.siteA} tapi HILANG di Site${pair.siteB}`
-                    });
-                } else {
-                    // Cek Hari
-                    if (itemA.day !== itemB.day) {
-                        allIssues.push({
-                            market: market.name,
-                            date: itemA.date,
-                            pair: pairLabel,
-                            status: 'DAY_MISMATCH',
-                            detail: `Hari BEDA! Site${pair.siteA}: "${itemA.day}" vs Site${pair.siteB}: "${itemB.day}"`
-                        });
-                    }
-                    
-                    // Cek Prize (Strict)
-                    if (String(itemA.prize) !== String(itemB.prize)) {
-                        allIssues.push({
-                            market: market.name,
-                            date: itemA.date,
-                            pair: pairLabel,
-                            status: 'PRIZE_MISMATCH',
-                            detail: `Prize BEDA! Site${pair.siteA}: [${itemA.prize}] vs Site${pair.siteB}: [${itemB.prize}]`
-                        });
-                    }
-                }
+        // SKENARIO 2: Majority Missing (Mayoritas gak punya data ini)
+        // Anggap data ini memang tidak seharusnya ada, yang punya data justru yang salah/input manual
+        if (presentSites.length < (siteResults.length / 2)) {
+            presentSites.forEach(ps => {
+                issues.push({
+                    market: marketName,
+                    date: date,
+                    culprit: `Site${ps.siteNum}`,
+                    status: 'PHANTOM_DATA',
+                    detail: `Site${ps.siteNum} memiliki data tanggal ${date} TAPI mayoritas situs lain tidak memilikinya.`
+                });
+            });
+            continue;
+        }
+
+        // SKENARIO 3: Minority Missing (Minority gak punya data) -> INI YANG KAMU MAU!
+        if (missingSites.length > 0 && missingSites.length < (siteResults.length / 2)) {
+            missingSites.forEach(ms => {
+                issues.push({
+                    market: marketName,
+                    date: date,
+                    culprit: `Site${ms.siteNum}`,
+                    status: 'DATA_MISSING',
+                    detail: `Site${ms.siteNum} KEHILANGAN data tanggal ${date}. (${presentSites.length}/${siteResults.length} situs lain memiliki data ini)`
+                });
+            });
+        }
+
+        // SKENARIO 4: Cek Prize/Hari pada situs yang PRESENT
+        if (presentSites.length >= 2) {
+            // Cari nilai yang paling umum (mode) untuk hari dan prize
+            const dayCounts = {};
+            const prizeCounts = {};
+            
+            presentSites.forEach(ps => {
+                dayCounts[ps.item.day] = (dayCounts[ps.item.day] || 0) + 1;
+                prizeCounts[ps.item.prize] = (prizeCounts[ps.item.prize] || 0) + 1;
             });
 
-            // Cek Data yang ada di B tapi tidak di A (Reverse Missing)
-            resultB.data.forEach(itemB => {
-                const itemA = resultA.data.find(a => a.date === itemB.date);
-                if (!itemA) {
-                    allIssues.push({
-                        market: market.name,
-                        date: itemB.date,
-                        pair: pairLabel,
-                        status: 'DATA_MISSING_REVERSE',
-                        detail: `Data tanggal ${itemB.date} ADA di Site${pair.siteB} tapi HILANG di Site${pair.siteA}`
+            const majorityDay = Object.keys(dayCounts).reduce((a, b) => dayCounts[a] > dayCounts[b] ? a : b);
+            const majorityPrize = Object.keys(prizeCounts).reduce((a, b) => prizeCounts[a] > prizeCounts[b] ? a : b);
+
+            presentSites.forEach(ps => {
+                const diffs = [];
+                if (ps.item.day !== majorityDay) diffs.push(`Hari: "${ps.item.day}" (Majority: "${majorityDay}")`);
+                if (ps.item.prize !== majorityPrize) diffs.push(`Prize: "${ps.item.prize}" (Majority: "${majorityPrize}")`);
+
+                if (diffs.length > 0) {
+                    issues.push({
+                        market: marketName,
+                        date: date,
+                        culprit: `Site${ps.siteNum}`,
+                        status: 'VALUE_MISMATCH',
+                        detail: `Site${ps.siteNum} SALAH NILAI! ${diffs.join(' | ')}`
                     });
                 }
             });
         }
+    }
+
+    return issues;
+}
+
+// ==========================================
+// ENDPOINT UTAMA: /scan-smart
+// ==========================================
+app.get('/scan-smart', async (req, res) => {
+    const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5].filter(Boolean);
+    
+    if (urls.length < 2) {
+        return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan' });
+    }
+
+    console.log(` Smart Scan Started | ${urls.length} sites × 64 markets`);
+    const startTime = Date.now();
+    const allIssues = [];
+
+    for (const market of MARKETS) {
+        console.log(`   Checking: ${market.name} (${market.id})...`);
+
+        // Fetch semua situs paralel untuk market ini
+        const siteResults = await Promise.all(
+            urls.map(url => scrapeSite(url, market.id))
+        );
+
+        // Jalankan Majority Vote Validation
+        const marketIssues = validateWithMajorityVote(market.name, siteResults);
+        allIssues.push(...marketIssues);
         
-        // Delay antar market agar IP Railway tidak diblokir LiteSpeed
+        // Delay anti-blokir
         await new Promise(r => setTimeout(r, 1200));
     }
 
@@ -247,16 +260,15 @@ app.get('/scan-chain', async (req, res) => {
         execution_time_seconds: duration,
         summary: {
             total_sites: urls.length,
-            chain_links_checked: chainPairs.length,
             markets_scanned: 64,
             total_issues_found: allIssues.length,
             is_fully_synced: allIssues.length === 0
         },
-        errors: allIssues // Hanya berisi masalah, kosong jika sempurna
+        errors: allIssues
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '⛓️ Final Fixed Chain Comparator API Ready!' }));
+app.get('/', (req, res) => res.json({ message: '🧠 Smart Majority Vote Validator Ready!' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(` Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
