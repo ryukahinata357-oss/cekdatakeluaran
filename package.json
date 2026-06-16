@@ -1,6 +1,6 @@
 {
-  "name": "smart-togel-validator",
-  "version": "2.0.0",
+  "name": "universal-togel-validator-final",
+  "version": "3.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
