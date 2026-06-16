@@ -9,9 +9,10 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// DATABASE PASARAN (ID 1-64)
+// CANONICAL MARKET DATABASE & MAPPING
+// Kita definisikan "Nama Standar" untuk setiap pasaran
 // ==========================================
-const MARKETS = [
+const CANONICAL_MARKETS = [
     { id: '1', name: 'Roma' }, { id: '2', name: 'Kentucky Mid' }, { id: '3', name: 'Turin' },
     { id: '4', name: 'Florida Mid' }, { id: '5', name: 'Newyork Mid' }, { id: '6', name: 'Carolina Day' },
     { id: '7', name: 'Madrid' }, { id: '8', name: 'Bulgaria' }, { id: '9', name: 'Oregon 03' },
@@ -36,6 +37,7 @@ const MARKETS = [
     { id: '64', name: 'Oslo' }
 ];
 
+// Helper Functions
 const fixUrl = (raw) => {
     if (!raw) return null;
     let url = raw.trim().replace(/\/+$/, '');
@@ -46,25 +48,18 @@ const getDomainName = (url) => {
     try {
         const u = new URL(fixUrl(url));
         return u.hostname.replace('www.', '');
-    } catch {
-        return url;
-    }
+    } catch { return url; }
 };
 
-// Helper: Normalisasi Tanggal untuk Matching
 const normalizeDate = (str) => {
     if (!str) return '';
-    return str.trim().toLowerCase()
-        .replace(/\s+/g, '')
-        .replace(/juni/g, 'jun')
-        .replace(/juli/g, 'jul');
+    return str.trim().toLowerCase().replace(/\s+/g, '').replace(/juni/g, 'jun').replace(/juli/g, 'jul');
 };
 
 // ==========================================
-// REGEX-BASED TEXT EXTRACTION ENGINE
-// Mengambil data murni dari pola teks, bukan struktur HTML
+// SMART SCRAPING ENGINE WITH AUTO-MAPPING
 // ==========================================
-async function scrapeSite(baseUrl, marketId) {
+async function scrapeSite(baseUrl, canonicalMarketId) {
     try {
         const fixedBase = fixUrl(baseUrl);
         const jar = new CookieJar();
@@ -87,12 +82,12 @@ async function scrapeSite(baseUrl, marketId) {
         
         if (!csrfToken || !rawSnapshot) return { success: false, error: 'Gagal ambil token/snapshot' };
 
-        // Step 2: Post Livewire Update
+        // Step 2: Post Livewire Update dengan ID Canonical
         const payload = {
             _token: csrfToken,
             components: [{
                 snapshot: rawSnapshot,
-                updates: { market: String(marketId) },
+                updates: { market: String(canonicalMarketId) },
                 calls: []
             }]
         };
@@ -102,24 +97,28 @@ async function scrapeSite(baseUrl, marketId) {
                 'Content-Type': 'application/json',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json',
-                'Referer': `${fixedBase}/data-keluaran?market=${marketId}`
+                'Referer': `${fixedBase}/data-keluaran?market=${canonicalMarketId}`
             }
         });
 
-        // Step 3: Ekstrak Data Menggunakan REGEX PADA TEKS MENTAH
+        // Step 3: DETEKSI NAMA PASARAN ASLI DARI HTML RESPONSE
+        // Ini kunci agar sistem tahu apakah ID 32 itu Singapore 4D atau Toto di situs ini
         const htmlContent = updateRes.data.components[0].effects.html;
+        const $html = cheerio.load(htmlContent);
         
-        // Bersihkan tag HTML agar jadi teks polos, tapi pertahankan spasi/newline
+        // Cari teks pasaran di baris pertama hasil (biasanya ada di kolom pertama)
+        let actualMarketName = '';
+        const firstRow = $html('div.flex.overflow-hidden.border.rounded-lg').first();
+        if (firstRow.length > 0) {
+            actualMarketName = firstRow.find('div').first().text().trim().toUpperCase();
+        }
+
+        // Step 4: Ekstrak Data Menggunakan REGEX
         const plainText = htmlContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
-        
         const results = [];
         const seenDates = new Set();
 
-        // POLA REGEX UTAMA: 
-        // (Hari) + (Tanggal DD MMM YY) + (Prize 4 Digit)
-        // Contoh match: "Senin 15 Jun 26 9764" atau "Minggu 14 jun 26 5174"
         const regex = /\b(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{2})\s+(\d{4})\b/gi;
-        
         let match;
         while ((match = regex.exec(plainText)) !== null) {
             const dayRaw = match[1];
@@ -129,18 +128,19 @@ async function scrapeSite(baseUrl, marketId) {
             const dayNorm = dayRaw.toLowerCase().replace(/\s+/g, '');
             const dateNorm = normalizeDate(dateRaw);
 
-            // Filter: Pastikan tanggal valid dan belum pernah masuk (anti duplikat)
             if (dayNorm && dateNorm && prize && !seenDates.has(dateNorm)) {
                 seenDates.add(dateNorm);
-                results.push({
-                    day: dayNorm,
-                    date: dateNorm,
-                    prize: prize
-                });
+                results.push({ day: dayNorm, date: dateNorm, prize });
             }
         }
 
-        return { success: true, data: results };
+        // Return data BESERTA nama pasaran asli yang terdeteksi
+        return { 
+            success: true, 
+            data: results,
+            actualMarketName: actualMarketName 
+        };
+
     } catch (err) {
         return { 
             success: false, 
@@ -150,9 +150,10 @@ async function scrapeSite(baseUrl, marketId) {
 }
 
 // ==========================================
-// MAJORITY VOTE VALIDATION (TETAP SAMA)
+// UNIVERSAL MAJORITY VOTE VALIDATION
+// Membandingkan berdasarkan CANONICAL NAME, bukan ID
 // ==========================================
-function validateWithMajorityVote(marketName, siteResults, siteUrls) {
+function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
     const issues = [];
     
     const validSites = siteResults.filter(r => r.success && r.data.length > 0);
@@ -160,6 +161,7 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
 
     if (validSites.length === 0) return issues;
 
+    // Kumpulkan semua tanggal unik HANYA dari situs yang valid
     const allDates = new Set();
     validSites.forEach(res => res.data.forEach(item => allDates.add(item.date)));
 
@@ -167,28 +169,31 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
         const entries = siteResults.map((res, idx) => ({
             domain: getDomainName(siteUrls[idx]),
             success: res.success,
-            hasData: res.success && res.data.length > 0,
-            item: res.success ? res.data.find(d => d.date === dateNorm) : null
+            hasData: res.success && r.data.length > 0,
+            item: res.success ? res.data.find(d => d.date === dateNorm) : null,
+            actualName: res.actualMarketName || '' // Simpan nama asli untuk debugging
         }));
 
         const presentSites = entries.filter(e => e.item);
-        const missingSites = entries.filter(e => !e.item && e.hasData);
-        const failedSites = entries.filter(e => !e.success || !e.hasData);
+        const missingSites = entries.filter(e => !e.item && e.success && e.data.length > 0);
+        const failedSites = entries.filter(e => !e.success || (e.success && e.data.length === 0));
 
+        // SKENARIO 1: Semua situs gagal
         if (failedSites.length > 0 && presentSites.length === 0) {
             failedSites.forEach(fs => {
                 issues.push({
-                    market: marketName, date: dateNorm, culprit: fs.domain,
+                    market: canonicalMarketName, date: dateNorm, culprit: fs.domain,
                     status: 'FETCH_FAILED', detail: 'Situs ini gagal mengambil data.'
                 });
             });
             continue; 
         }
 
+        // SKENARIO 2: Minority Missing
         if (missingSites.length > 0 && presentSites.length >= (siteResults.length / 2)) {
             missingSites.forEach(ms => {
                 issues.push({
-                    market: marketName, date: dateNorm, culprit: ms.domain,
+                    market: canonicalMarketName, date: dateNorm, culprit: ms.domain,
                     status: 'DATA_MISSING',
                     reference: `${presentSites.length}/${siteResults.length} situs lain memiliki data ini`,
                     detail: `KEHILANGAN data tanggal ${dateNorm}.`
@@ -196,6 +201,7 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
             });
         }
 
+        // SKENARIO 3: Cek Prize/Hari pada situs yang PRESENT
         if (presentSites.length >= 2) {
             const dayCounts = {};
             const prizeCounts = {};
@@ -214,7 +220,7 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
 
                 if (diffs.length > 0) {
                     issues.push({
-                        market: marketName, date: dateNorm, culprit: ps.domain,
+                        market: canonicalMarketName, date: dateNorm, culprit: ps.domain,
                         status: 'VALUE_MISMATCH',
                         reference: `Majority: Hari="${majorityDay}", Prize="${majorityPrize}"`,
                         detail: `SALAH NILAI! ${diffs.join(' | ')}`
@@ -224,10 +230,11 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
         }
     }
 
+    // SKENARIO 4: Deteksi Situs Kosong Total
     failedOrEmptySites.forEach(fes => {
         if (validSites.length > 0) {
             issues.push({
-                market: marketName, date: 'ALL_DATES', culprit: fes.domain,
+                market: canonicalMarketName, date: 'ALL_DATES', culprit: fes.domain,
                 status: 'TOTAL_DATA_MISSING',
                 detail: 'Situs ini tidak mengembalikan data apapun.'
             });
@@ -247,17 +254,20 @@ app.get('/scan-final', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan (?url1=...&url2=...)' });
     }
 
-    console.log(` Regex Scan Started | ${urls.length} sites × 64 markets`);
+    console.log(` Universal Scan Started | ${urls.length} sites × 64 markets`);
     const startTime = Date.now();
     const allIssues = [];
 
-    for (const market of MARKETS) {
-        console.log(`   Checking: ${market.name} (${market.id})...`);
+    // Loop berdasarkan CANONICAL MARKETS (Standar Kita)
+    for (const market of CANONICAL_MARKETS) {
+        console.log(`   Checking Canonical: ${market.name} (ID: ${market.id})...`);
 
+        // Fetch semua situs paralel untuk market canonical ini
         const siteResults = await Promise.all(
             urls.map(url => scrapeSite(url, market.id))
         );
 
+        // Validasi menggunakan nama canonical, bukan nama dari situs
         const marketIssues = validateWithMajorityVote(market.name, siteResults, urls);
         allIssues.push(...marketIssues);
         
@@ -279,7 +289,7 @@ app.get('/scan-final', async (req, res) => {
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '🧠 Regex Text Validator Ready!' }));
+app.get('/', (req, res) => res.json({ message: '🧠 Universal Market Mapper Ready!' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
