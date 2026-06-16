@@ -7,26 +7,34 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// KONFIGURASI KECEPATAN
+// KONFIGURASI & DATABASE PASARAN
 // ==========================================
-const MAX_CONCURRENT_MARKETS = 6; // Maksimal 6 market diproses barengan (aman & cepat)
-const REQUEST_TIMEOUT = 10000;    // Timeout 10 detik per request
+const REQUEST_TIMEOUT = 12000; // Timeout sedikit lebih lama untuk akurasi
 
-// Database Pasaran 1-64
-const MARKETS = Array.from({ length: 64 }, (_, i) => ({
-    id: String(i + 1),
-    name: ['Roma','Kentucky Mid','Turin','Florida Mid','Newyork Mid','Carolina Day',
-           'Madrid','Bulgaria','Oregon 03','Hungary','Miami','Oregon 06',
-           'California','Florida Eve','Oregon 09','Newyork Eve','Kentucky Eve','Austria',
-           'Carolina Eve','Cambodia','Bullseye','Laos','Oregon 12','Toto Macau P1',
-           'Sydney','Guangdong','China','Toto Macau 5D P1','Toto Macau P2','Philippines',
-           'Japan','Singapore 4D','Jeju Lotto','Toto Beijing','Toto Macau P3','Toto Fuzhou',
-           'Cyprus','Taiwan','Toto Macau 5D P2','Iceland','Toto Macau P4','Bhutan',
-           'Hongkong','Toto Macau P5','Toronto','Toto Macau P6','Singapore Toto','Kingkong P1',
-           'Kingkong P2','Chengdu','Chongqing','Cuba','Denver','Ecuador',
-           'Foshan','Haiti','Kowloon','Monaco','Taichung','Italy',
-           'France','Chile','Mexico','Oslo'][i] || `Market ${i+1}`
-}));
+const MARKETS = [
+    { id: '1', name: 'Roma' }, { id: '2', name: 'Kentucky Mid' }, { id: '3', name: 'Turin' },
+    { id: '4', name: 'Florida Mid' }, { id: '5', name: 'Newyork Mid' }, { id: '6', name: 'Carolina Day' },
+    { id: '7', name: 'Madrid' }, { id: '8', name: 'Bulgaria' }, { id: '9', name: 'Oregon 03' },
+    { id: '10', name: 'Hungary' }, { id: '11', name: 'Miami' }, { id: '12', name: 'Oregon 06' },
+    { id: '13', name: 'California' }, { id: '14', name: 'Florida Eve' }, { id: '15', name: 'Oregon 09' },
+    { id: '16', name: 'Newyork Eve' }, { id: '17', name: 'Kentucky Eve' }, { id: '18', name: 'Austria' },
+    { id: '19', name: 'Carolina Eve' }, { id: '20', name: 'Cambodia' }, { id: '21', name: 'Bullseye' },
+    { id: '22', name: 'Laos' }, { id: '23', name: 'Oregon 12' }, { id: '24', name: 'Toto Macau P1' },
+    { id: '25', name: 'Sydney' }, { id: '26', name: 'Guangdong' }, { id: '27', name: 'China' },
+    { id: '28', name: 'Toto Macau 5D P1' }, { id: '29', name: 'Toto Macau P2' }, { id: '30', name: 'Philippines' },
+    { id: '31', name: 'Japan' }, { id: '32', name: 'Singapore 4D' }, { id: '33', name: 'Jeju Lotto' },
+    { id: '34', name: 'Toto Beijing' }, { id: '35', name: 'Toto Macau P3' }, { id: '36', name: 'Toto Fuzhou' },
+    { id: '37', name: 'Cyprus' }, { id: '38', name: 'Taiwan' }, { id: '39', name: 'Toto Macau 5D P2' },
+    { id: '40', name: 'Iceland' }, { id: '41', name: 'Toto Macau P4' }, { id: '42', name: 'Bhutan' },
+    { id: '43', name: 'Hongkong' }, { id: '44', name: 'Toto Macau P5' }, { id: '45', name: 'Toronto' },
+    { id: '46', name: 'Toto Macau P6' }, { id: '47', name: 'Singapore Toto' }, { id: '48', name: 'Kingkong P1' },
+    { id: '49', name: 'Kingkong P2' }, { id: '50', name: 'Chengdu' }, { id: '51', name: 'Chongqing' },
+    { id: '52', name: 'Cuba' }, { id: '53', name: 'Denver' }, { id: '54', name: 'Ecuador' },
+    { id: '55', name: 'Foshan' }, { id: '56', name: 'Haiti' }, { id: '57', name: 'Kowloon' },
+    { id: '58', name: 'Monaco' }, { id: '59', name: 'Taichung' }, { id: '60', name: 'Italy' },
+    { id: '61', name: 'France' }, { id: '62', name: 'Chile' }, { id: '63', name: 'Mexico' },
+    { id: '64', name: 'Oslo' }
+];
 
 // Helper Functions
 const fixUrl = (raw) => {
@@ -70,100 +78,109 @@ async function scrapeSite(baseUrl, marketId) {
 }
 
 // ==========================================
-// CONCURRENCY POOL (JANTUNG PERCEPATAN)
+// ENDPOINT UTAMA: /scan-chain
 // ==========================================
-async function processWithConcurrency(items, concurrencyLimit, asyncFn) {
-    const results = [];
-    let index = 0;
-
-    async function worker() {
-        while (index < items.length) {
-            const currentIndex = index++;
-            const item = items[currentIndex];
-            console.log(`   [Pool] Processing ${item.name || item} (${currentIndex + 1}/${items.length})`);
-            
-            const result = await asyncFn(item, currentIndex);
-            results[currentIndex] = result;
-        }
-    }
-
-    // Buat pool worker sesuai limit
-    const workers = Array(Math.min(concurrencyLimit, items.length)).fill(null).map(() => worker());
-    await Promise.all(workers);
-    
-    return results;
-}
-
-// ==========================================
-// ENDPOINT UTAMA: /scan-multi
-// ==========================================
-app.get('/scan-multi', async (req, res) => {
-    // Terima sampai 5 URL: url1, url2, url3, url4, url5
+app.get('/scan-chain', async (req, res) => {
     const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5].filter(Boolean);
     
     if (urls.length < 2) {
-        return res.status(400).json({ status: 'error', message: 'Minimal masukkan 2 URL (?url1=...&url2=...)' });
+        return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan' });
     }
 
-    console.log(` Starting HIGH-SPEED scan for ${urls.length} sites across 64 markets...`);
+    // Generate Chain Pairs: 1vs2, 2vs3, 3vs4, ..., Lastvs1
+    const chainPairs = [];
+    for (let i = 0; i < urls.length; i++) {
+        const nextIndex = (i + 1) % urls.length;
+        chainPairs.push({ 
+            siteA: i + 1, 
+            siteB: nextIndex + 1, 
+            urlA: urls[i], 
+            urlB: urls[nextIndex] 
+        });
+    }
+
+    console.log(`🔗 Chain Scan | ${urls.length} sites → ${chainPairs.length} links × 64 markets`);
     const startTime = Date.now();
     const allIssues = [];
 
-    // PROSES 64 MARKET DENGAN CONCURRENCY POOL
-    await processWithConcurrency(MARKETS, MAX_CONCURRENT_MARKETS, async (market) => {
-        
-        // 1. Fetch SEMUA SITUS untuk market ini SECARA PARALEL
+    // LOOP SEQUENTIAL PER MARKET (Aman dari rate-limit)
+    for (const market of MARKETS) {
+        console.log(`   Checking Market: ${market.name} (${market.id})`);
+
+        // 1. Fetch SEMUA SITUS SECARA PARALEL untuk market ini
         const siteResults = await Promise.all(
             urls.map(url => scrapeSite(url, market.id))
         );
 
-        // 2. Tentukan Master Site (yang datanya paling banyak & valid)
-        const validSites = siteResults.map((r, idx) => ({ ...r, siteIdx: idx }))
-                                      .filter(r => r.success && r.data.length > 0);
-        
-        if (validSites.length === 0) {
-            allIssues.push({
-                market: market.name,
-                status: 'ALL_SITES_FAILED',
-                detail: urls.map((u, i) => `Site${i+1}: ${siteResults[i].error}`).join(' | ')
-            });
-            return;
-        }
+        // 2. Cek SETIAP LINK DALAM RANTAI
+        for (const pair of chainPairs) {
+            const resultA = siteResults[pair.siteA - 1];
+            const resultB = siteResults[pair.siteB - 1];
+            const pairLabel = `Site${pair.siteA} ↔ Site${pair.siteB}`;
 
-        // Sort by data count descending -> index 0 is Master
-        validSites.sort((a, b) => b.data.length - a.data.length);
-        const master = validSites[0];
-        const slaves = validSites.slice(1);
+            // Handle Fetch Error
+            if (!resultA.success || !resultB.success) {
+                allIssues.push({
+                    market: market.name,
+                    pair: pairLabel,
+                    status: 'FETCH_FAILED',
+                    detail: `Site${pair.siteA}: ${resultA.error || 'OK'} | Site${pair.siteB}: ${resultB.error || 'OK'}`
+                });
+                continue;
+            }
 
-        // 3. Bandingkan Slave vs Master
-        master.data.forEach(masterItem => {
-            slaves.forEach(slave => {
-                const slaveItem = slave.data.find(s => s.date === masterItem.date);
+            // STRICT COMPARISON: Cek setiap baris data
+            resultA.data.forEach(itemA => {
+                const itemB = resultB.data.find(b => b.date === itemA.date);
                 
-                if (!slaveItem) {
+                if (!itemB) {
                     allIssues.push({
                         market: market.name,
-                        date: masterItem.date,
-                        status: 'MISSING',
-                        detail: `Site${slave.siteIdx + 1} tidak punya data tanggal ${masterItem.date} (Ref: Site${master.siteIdx + 1})`
+                        date: itemA.date,
+                        pair: pairLabel,
+                        status: 'DATA_MISSING',
+                        detail: `Data tanggal ${itemA.date} ADA di Site${pair.siteA} tapi HILANG di Site${pair.siteB}`
                     });
                 } else {
-                    const diffs = [];
-                    if (masterItem.day !== slaveItem.day) diffs.push(`Hari: "${masterItem.day}" vs "${slaveItem.day}"`);
-                    if (masterItem.prize !== slaveItem.prize) diffs.push(`Prize: "${masterItem.prize}" vs "${slaveItem.prize}"`);
-                    
-                    if (diffs.length > 0) {
+                    // Cek Hari
+                    if (itemA.day !== itemB.day) {
                         allIssues.push({
                             market: market.name,
-                            date: masterItem.date,
-                            status: 'MISMATCH',
-                            detail: `Site${slave.siteIdx + 1} vs Site${master.siteIdx + 1}: ${diffs.join(' | ')}`
+                            date: itemA.date,
+                            pair: pairLabel,
+                            status: 'DAY_MISMATCH',
+                            detail: `Hari BEDA! Site${pair.siteA}: "${itemA.day}" vs Site${pair.siteB}: "${itemB.day}"`
+                        });
+                    }
+                    
+                    // Cek Prize (Strict)
+                    if (itemA.prize !== itemB.prize) {
+                        allIssues.push({
+                            market: market.name,
+                            date: itemA.date,
+                            pair: pairLabel,
+                            status: 'PRIZE_MISMATCH',
+                            detail: `Prize BEDA! Site${pair.siteA}: "${itemA.prize}" vs Site${pair.siteB}: "${itemB.prize}"`
                         });
                     }
                 }
             });
-        });
-    });
+
+            // Cek Data yang ada di B tapi tidak di A (Reverse Missing)
+            resultB.data.forEach(itemB => {
+                const itemA = resultA.data.find(a => a.date === itemB.date);
+                if (!itemA) {
+                    allIssues.push({
+                        market: market.name,
+                        date: itemB.date,
+                        pair: pairLabel,
+                        status: 'DATA_MISSING_REVERSE',
+                        detail: `Data tanggal ${itemB.date} ADA di Site${pair.siteB} tapi HILANG di Site${pair.siteA}`
+                    });
+                }
+            });
+        }
+    }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
 
@@ -171,16 +188,17 @@ app.get('/scan-multi', async (req, res) => {
         status: 'success',
         execution_time_seconds: duration,
         summary: {
-            sites_compared: urls.length,
+            total_sites: urls.length,
+            chain_links_checked: chainPairs.length,
             markets_scanned: 64,
-            total_issues: allIssues.length,
-            is_perfect_sync: allIssues.length === 0
+            total_issues_found: allIssues.length,
+            is_fully_synced: allIssues.length === 0
         },
-        errors: allIssues // Hanya tampilkan yang bermasalah
+        errors: allIssues // Hanya berisi masalah, kosong jika sempurna
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '⚡ High-Speed Multi-Site Scanner Ready!' }));
+app.get('/', (req, res) => res.json({ message: '⛓️ Chain Comparator API Ready!' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(` Server running on port ${PORT}`));
