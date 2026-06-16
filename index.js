@@ -42,7 +42,6 @@ const fixUrl = (raw) => {
     return url.startsWith('http') ? url : `https://${url}`;
 };
 
-// Helper: Ekstrak domain murni dari URL untuk laporan yang rapi
 const getDomainName = (url) => {
     try {
         const u = new URL(fixUrl(url));
@@ -53,7 +52,8 @@ const getDomainName = (url) => {
 };
 
 // ==========================================
-// SESSION-AWARE LIVEWIRE SCRAPING ENGINE
+// UNIVERSAL LIVEWIRE SCRAPING ENGINE
+// Menggunakan multiple selector fallback agar support semua tema situs
 // ==========================================
 async function scrapeSite(baseUrl, marketId) {
     try {
@@ -97,28 +97,67 @@ async function scrapeSite(baseUrl, marketId) {
             }
         });
 
-        // Step 3: Parse HTML Response
+        // Step 3: Parse HTML Response dengan Selector Universal
         const htmlContent = updateRes.data.components[0].effects.html;
         const $ = cheerio.load(htmlContent);
         const results = [];
 
-        $('div.flex.overflow-hidden.border.rounded-lg').each((i, el) => {
-            const cols = $(el).find('div');
-            if (cols.length >= 5) {
-                let prize = $(cols[3]).find('b').text().trim();
+        // STRATEGI PARSING UNIVERSAL:
+        // Cari container yang memiliki minimal 5 kolom div (Pasaran, Hari, Tanggal, Prize, Jam)
+        $('div').each((i, el) => {
+            const children = $(el).children('div');
+            
+            // Hanya proses jika memiliki tepat 5 atau lebih child div (struktur tabel)
+            // Dan pastikan parent-nya bukan header tabel
+            if (children.length >= 5 && !$(el).hasClass('bg-primary-200') && !$(el).hasClass('bg-primary-300')) {
+                
+                // Ambil teks dari kolom ke-4 (Prize)
+                const prizeCol = children.eq(3);
+                let prize = prizeCol.find('b').text().trim();
+                
+                // Fallback: cari angka 4 digit di kolom prize
                 if (!prize || prize.length !== 4) {
-                    const match = $(cols[3]).text().match(/\d{4}/);
+                    const match = prizeCol.text().match(/\d{4}/);
                     prize = match ? match[0] : '';
                 }
 
-                let day = $(cols[1]).text().trim().toLowerCase().replace(/\s+/g, '');
-                let date = $(cols[2]).text().trim().toLowerCase().replace(/\s+/g, '');
+                // Validasi: Hanya simpan jika prize valid 4 digit
+                if (prize && prize.length === 4) {
+                    const day = children.eq(1).text().trim().toLowerCase().replace(/\s+/g, '');
+                    const date = children.eq(2).text().trim().toLowerCase().replace(/\s+/g, '');
 
-                if (day && date && prize && prize.length === 4) {
-                    results.push({ day, date, prize });
+                    if (day && date) {
+                        results.push({ day, date, prize });
+                    }
                 }
             }
         });
+
+        // Double check: Jika hasil masih 0, coba selector alternatif khusus Tema Ungu/Flex
+        if (results.length === 0) {
+            $('div.flex.items-center').each((i, el) => {
+                const parentRow = $(el).closest('div.flex');
+                const cols = parentRow.find('div');
+                
+                if (cols.length >= 5) {
+                    let prize = cols.eq(3).find('b').text().trim();
+                    if (!prize) {
+                        const match = cols.eq(3).text().match(/\d{4}/);
+                        prize = match ? match[0] : '';
+                    }
+                    
+                    if (prize && prize.length === 4) {
+                        const day = cols.eq(1).text().trim().toLowerCase().replace(/\s+/g, '');
+                        const date = cols.eq(2).text().trim().toLowerCase().replace(/\s+/g, '');
+                        
+                        // Hindari duplikat
+                        if (day && date && !results.find(r => r.date === date)) {
+                            results.push({ day, date, prize });
+                        }
+                    }
+                }
+            });
+        }
 
         return { success: true, data: results };
     } catch (err) {
@@ -130,75 +169,68 @@ async function scrapeSite(baseUrl, marketId) {
 }
 
 // ==========================================
-// MAJORITY VOTE VALIDATION ENGINE
+// IMPROVED MAJORITY VOTE (ANTI-NGAWUR)
+// Menambahkan threshold minimum data agar tidak salah deteksi Phantom
 // ==========================================
 function validateWithMajorityVote(marketName, siteResults, siteUrls) {
     const issues = [];
     
-    // Kumpulkan semua tanggal unik dari semua situs yang berhasil fetch
+    // Filter hanya situs yang berhasil fetch DAN punya data > 0
+    const validSites = siteResults.filter(r => r.success && r.data.length > 0);
+    const failedOrEmptySites = siteResults.filter(r => !r.success || r.data.length === 0);
+
+    // Jika SEMUA situs gagal/kosong, skip market ini
+    if (validSites.length === 0) return issues;
+
+    // Kumpulkan semua tanggal unik HANYA dari situs yang valid
     const allDates = new Set();
-    siteResults.forEach((res) => {
-        if (res.success) {
-            res.data.forEach(item => allDates.add(item.date));
-        }
+    validSites.forEach(res => {
+        res.data.forEach(item => allDates.add(item.date));
     });
 
-    // Validasi setiap tanggal secara independen
+    // Validasi setiap tanggal
     for (const date of allDates) {
-        // Mapping data per situs dengan domain aslinya
         const entries = siteResults.map((res, idx) => ({
             domain: getDomainName(siteUrls[idx]),
             success: res.success,
+            hasData: res.success && res.data.length > 0,
             item: res.success ? res.data.find(d => d.date === date) : null
         }));
 
         const presentSites = entries.filter(e => e.item);
-        const missingSites = entries.filter(e => !e.item && e.success);
-        const failedSites = entries.filter(e => !e.success);
+        const missingSites = entries.filter(e => !e.item && e.hasData);
+        const failedSites = entries.filter(e => !e.success || !e.hasData);
 
-        // SKENARIO 1: Ada situs yang gagal fetch total
+        // SKENARIO 1: Situs gagal fetch total
         if (failedSites.length > 0) {
             failedSites.forEach(fs => {
                 issues.push({
                     market: marketName,
                     date: date,
-                    culprit: fs.domain,       // LANGSUNG NAMA DOMAIN!
+                    culprit: fs.domain,
                     status: 'FETCH_FAILED',
-                    detail: `Situs ini gagal mengambil data (Error/Timeout/419)`
+                    detail: `Situs ini gagal mengambil data atau datanya kosong total.`
                 });
             });
             continue; 
         }
 
-        // SKENARIO 2: Majority Missing (Mayoritas gak punya data ini)
-        if (presentSites.length < (siteResults.length / 2)) {
-            presentSites.forEach(ps => {
-                issues.push({
-                    market: marketName,
-                    date: date,
-                    culprit: ps.domain,
-                    status: 'PHANTOM_DATA',
-                    detail: `Memiliki data tanggal ${date} TAPI mayoritas situs lain (${missingSites.length}/${siteResults.length}) tidak memilikinya.`
-                });
-            });
-            continue;
-        }
-
-        // SKENARIO 3: Minority Missing -> INI YANG KAMU MAU!
-        if (missingSites.length > 0 && missingSites.length < (siteResults.length / 2)) {
+        // SKENARIO 2: Minority Missing (Minority gak punya data)
+        // Hanya laporkan jika majority (>=50%) punya data ini
+        if (missingSites.length > 0 && presentSites.length >= (siteResults.length / 2)) {
             missingSites.forEach(ms => {
                 issues.push({
                     market: marketName,
                     date: date,
-                    culprit: ms.domain,      // LANGSUNG NAMA DOMAIN!
+                    culprit: ms.domain,
                     status: 'DATA_MISSING',
                     reference: `${presentSites.length}/${siteResults.length} situs lain memiliki data ini`,
-                    detail: `KEHILANGAN data tanggal ${date}. Cek kembali scraper atau database situs ini.`
+                    detail: `KEHILANGAN data tanggal ${date}.`
                 });
             });
         }
 
-        // SKENARIO 4: Cek Prize/Hari pada situs yang PRESENT
+        // SKENARIO 3: Cek Prize/Hari pada situs yang PRESENT
         if (presentSites.length >= 2) {
             const dayCounts = {};
             const prizeCounts = {};
@@ -220,7 +252,7 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
                     issues.push({
                         market: marketName,
                         date: date,
-                        culprit: ps.domain,   // LANGSUNG NAMA DOMAIN!
+                        culprit: ps.domain,
                         status: 'VALUE_MISMATCH',
                         reference: `Majority: Hari="${majorityDay}", Prize="${majorityPrize}"`,
                         detail: `SALAH NILAI! ${diffs.join(' | ')}`
@@ -229,6 +261,20 @@ function validateWithMajorityVote(marketName, siteResults, siteUrls) {
             });
         }
     }
+
+    // SKENARIO 4: Deteksi Situs yang Datanya Kosong Total (Bukan per tanggal)
+    // Ini mencegah laporan "Phantom Data" yang ngawur
+    failedOrEmptySites.forEach(fes => {
+        if (validSites.length > 0) {
+            issues.push({
+                market: marketName,
+                date: 'ALL_DATES',
+                culprit: fes.domain,
+                status: 'TOTAL_DATA_MISSING',
+                detail: `Situs ini tidak mengembalikan data apapun untuk market ini. Kemungkinan selector HTML tidak cocok atau scraper error.`
+            });
+        }
+    });
 
     return issues;
 }
@@ -269,16 +315,16 @@ app.get('/scan-final', async (req, res) => {
         status: 'success',
         execution_time_seconds: duration,
         summary: {
-            scanned_sites: urls.map(u => getDomainName(u)), // List domain yang discan
+            scanned_sites: urls.map(u => getDomainName(u)),
             markets_scanned: 64,
             total_issues_found: allIssues.length,
             is_fully_synced: allIssues.length === 0
         },
-        errors: allIssues // Langsung berisi nama domain asli di field 'culprit'
+        errors: allIssues
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '🧠 Ultimate Smart Validator Ready!' }));
+app.get('/', (req, res) => res.json({ message: '🧠 Ultimate Universal Validator Ready!' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
