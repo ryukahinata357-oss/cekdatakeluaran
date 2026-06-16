@@ -10,7 +10,7 @@ app.use(cors());
 
 // ==========================================
 // CANONICAL MARKET DATABASE
-// Standar ID Pasaran Kita
+// Ini adalah "Kebenaran Mutlak" kita
 // ==========================================
 const CANONICAL_MARKETS = [
     { id: '1', name: 'Roma' }, { id: '2', name: 'Kentucky Mid' }, { id: '3', name: 'Turin' },
@@ -37,6 +37,7 @@ const CANONICAL_MARKETS = [
     { id: '64', name: 'Oslo' }
 ];
 
+// Helper Functions
 const fixUrl = (raw) => {
     if (!raw) return null;
     let url = raw.trim().replace(/\/+$/, '');
@@ -56,11 +57,115 @@ const normalizeDate = (str) => {
 };
 
 // ==========================================
-// SMART SCRAPING ENGINE
+// DYNAMIC MARKET MAPPING ENGINE
+// Mendeteksi ID asli setiap pasaran di setiap situs
 // ==========================================
-async function scrapeSite(baseUrl, canonicalMarketId) {
+async function detectMarketMapping(baseUrl) {
+    const mapping = {}; // { canonicalId: actualSiteId }
+    
     try {
         const fixedBase = fixUrl(baseUrl);
+        const jar = new CookieJar();
+        const agent = new HttpsCookieAgent({ cookies: { jar } });
+        
+        const client = axiosBase.create({
+            httpsAgent: agent,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml'
+            },
+            timeout: 10000
+        });
+
+        // Ambil token & snapshot awal
+        const initRes = await client.get(`${fixedBase}/data-keluaran`);
+        const $init = cheerio.load(initRes.data);
+        const csrfToken = $init('meta[name="csrf-token"]').attr('content');
+        const rawSnapshot = $init('[wire\\:id]').first().attr('wire:snapshot');
+        
+        if (!csrfToken || !rawSnapshot) return null;
+
+        // Cek khusus untuk pasangan Singapore (ID 32 & 47)
+        // Kita tes kedua ID ini untuk melihat mana yang mengembalikan nama yang benar
+        const testIds = ['32', '47'];
+        const detectedNames = {};
+
+        for (const testId of testIds) {
+            const payload = {
+                _token: csrfToken,
+                components: [{
+                    snapshot: rawSnapshot,
+                    updates: { market: testId },
+                    calls: []
+                }]
+            };
+
+            try {
+                const res = await client.post(`${fixedBase}/livewire/update`, payload, {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Requested-With': 'XMLHttpRequest',
+                        'Accept': 'application/json',
+                        'Referer': `${fixedBase}/data-keluaran?market=${testId}`
+                    }
+                });
+
+                // Baca nama pasaran dari HTML response
+                const html = res.data.components[0].effects.html;
+                const $html = cheerio.load(html);
+                const firstRow = $html('div.flex.overflow-hidden.border.rounded-lg').first();
+                
+                if (firstRow.length > 0) {
+                    const marketName = firstRow.find('div').first().text().trim().toUpperCase();
+                    detectedNames[testId] = marketName;
+                }
+            } catch (e) {
+                // Ignore error per test
+            }
+        }
+
+        // LOGIKA MAPPING:
+        // Canonical 32 = Singapore 4D
+        // Canonical 47 = Singapore Toto
+        
+        const id32Name = detectedNames['32'] || '';
+        const id47Name = detectedNames['47'] || '';
+
+        // Default mapping (sama dengan canonical)
+        mapping['32'] = '32'; 
+        mapping['47'] = '47';
+
+        // Deteksi jika terbalik
+        if (id32Name.includes('TOTO') && id47Name.includes('4D')) {
+            console.log(`   ⚠️ Detected SWAPPED IDs for ${getDomainName(baseUrl)}: 32=Toto, 47=4D`);
+            mapping['32'] = '47'; // Kalau mau 4D, harus request ID 47
+            mapping['47'] = '32'; // Kalau mau Toto, harus request ID 32
+        } else if (id32Name.includes('4D') && id47Name.includes('TOTO')) {
+            console.log(`   ✅ Normal IDs for ${getDomainName(baseUrl)}: 32=4D, 47=Toto`);
+        } else {
+            console.log(`   ❓ Could not detect Singapore mapping for ${getDomainName(baseUrl)}, using default.`);
+        }
+
+        return mapping;
+
+    } catch (err) {
+        console.error(`   ❌ Failed to detect mapping for ${baseUrl}:`, err.message);
+        return null;
+    }
+}
+
+// ==========================================
+// SMART SCRAPING ENGINE (Menggunakan Mapped ID)
+// ==========================================
+async function scrapeSite(baseUrl, canonicalMarketId, siteMapping) {
+    try {
+        const fixedBase = fixUrl(baseUrl);
+        
+        // Gunakan ID yang sudah dipetakan jika ada,否则 pakai ID canonical
+        const actualId = (siteMapping && siteMapping[String(canonicalMarketId)]) 
+                         ? siteMapping[String(canonicalMarketId)] 
+                         : String(canonicalMarketId);
+
         const jar = new CookieJar();
         const agent = new HttpsCookieAgent({ cookies: { jar } });
         
@@ -81,12 +186,12 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
         
         if (!csrfToken || !rawSnapshot) return { success: false, error: 'Gagal ambil token/snapshot' };
 
-        // Step 2: Post Livewire Update
+        // Step 2: Post Livewire Update dengan ACTUAL ID (bukan canonical)
         const payload = {
             _token: csrfToken,
             components: [{
                 snapshot: rawSnapshot,
-                updates: { market: String(canonicalMarketId) },
+                updates: { market: actualId }, // <--- INI KUNCINYA!
                 calls: []
             }]
         };
@@ -96,7 +201,7 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
                 'Content-Type': 'application/json',
                 'X-Requested-With': 'XMLHttpRequest',
                 'Accept': 'application/json',
-                'Referer': `${fixedBase}/data-keluaran?market=${canonicalMarketId}`
+                'Referer': `${fixedBase}/data-keluaran?market=${actualId}`
             }
         });
 
@@ -134,12 +239,11 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
 }
 
 // ==========================================
-// MAJORITY VOTE VALIDATION (FIXED TYPO)
+// MAJORITY VOTE VALIDATION
 // ==========================================
 function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
     const issues = [];
     
-    // Filter situs yang berhasil fetch DAN punya data > 0
     const validSites = siteResults.filter(r => r.success && r.data.length > 0);
     const failedOrEmptySites = siteResults.filter(r => !r.success || r.data.length === 0);
 
@@ -149,11 +253,10 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
     validSites.forEach(res => res.data.forEach(item => allDates.add(item.date)));
 
     for (const dateNorm of allDates) {
-        // PERBAIKAN DI SINI: Menggunakan 'res' bukan 'r'
         const entries = siteResults.map((res, idx) => ({
             domain: getDomainName(siteUrls[idx]),
             success: res.success,
-            hasData: res.success && res.data.length > 0, // Fixed: r -> res
+            hasData: res.success && res.data.length > 0,
             item: res.success ? res.data.find(d => d.date === dateNorm) : null
         }));
 
@@ -161,7 +264,6 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
         const missingSites = entries.filter(e => !e.item && e.hasData);
         const failedSites = entries.filter(e => !e.success || !e.hasData);
 
-        // SKENARIO 1: Semua situs gagal
         if (failedSites.length > 0 && presentSites.length === 0) {
             failedSites.forEach(fs => {
                 issues.push({
@@ -172,7 +274,6 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
             continue; 
         }
 
-        // SKENARIO 2: Minority Missing
         if (missingSites.length > 0 && presentSites.length >= (siteResults.length / 2)) {
             missingSites.forEach(ms => {
                 issues.push({
@@ -184,7 +285,6 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
             });
         }
 
-        // SKENARIO 3: Cek Prize/Hari pada situs yang PRESENT
         if (presentSites.length >= 2) {
             const dayCounts = {};
             const prizeCounts = {};
@@ -213,7 +313,6 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
         }
     }
 
-    // SKENARIO 4: Deteksi Situs Kosong Total
     failedOrEmptySites.forEach(fes => {
         if (validSites.length > 0) {
             issues.push({
@@ -241,11 +340,28 @@ app.get('/scan-final', async (req, res) => {
     const startTime = Date.now();
     const allIssues = [];
 
+    // LANGKAH 0: DETEKSI MAPPING UNTUK SETIAP SITUS
+    console.log(` 🔍 Detecting market mappings for ${urls.length} sites...`);
+    const siteMappings = {};
+    
+    for (const url of urls) {
+        const domain = getDomainName(url);
+        const mapping = await detectMarketMapping(url);
+        siteMappings[domain] = mapping || {};
+        console.log(`   ✅ Mapping ready for ${domain}`);
+    }
+
+    // LANGKAH 1: SCANNING DENGAN MAPPING
     for (const market of CANONICAL_MARKETS) {
         console.log(`   Checking Canonical: ${market.name} (ID: ${market.id})...`);
 
+        // Fetch semua situs paralel, masing-masing pakai mapping-nya sendiri
         const siteResults = await Promise.all(
-            urls.map(url => scrapeSite(url, market.id))
+            urls.map(url => {
+                const domain = getDomainName(url);
+                const mapping = siteMappings[domain];
+                return scrapeSite(url, market.id, mapping);
+            })
         );
 
         const marketIssues = validateWithMajorityVote(market.name, siteResults, urls);
@@ -269,7 +385,7 @@ app.get('/scan-final', async (req, res) => {
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '🧠 Universal Market Mapper Ready!' }));
+app.get('/', (req, res) => res.json({ message: '🧠 Dynamic Market Mapper Ready!' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
