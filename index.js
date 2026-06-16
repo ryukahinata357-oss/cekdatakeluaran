@@ -9,8 +9,8 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// CANONICAL MARKET DATABASE & MAPPING
-// Kita definisikan "Nama Standar" untuk setiap pasaran
+// CANONICAL MARKET DATABASE
+// Standar ID Pasaran Kita
 // ==========================================
 const CANONICAL_MARKETS = [
     { id: '1', name: 'Roma' }, { id: '2', name: 'Kentucky Mid' }, { id: '3', name: 'Turin' },
@@ -37,7 +37,6 @@ const CANONICAL_MARKETS = [
     { id: '64', name: 'Oslo' }
 ];
 
-// Helper Functions
 const fixUrl = (raw) => {
     if (!raw) return null;
     let url = raw.trim().replace(/\/+$/, '');
@@ -57,7 +56,7 @@ const normalizeDate = (str) => {
 };
 
 // ==========================================
-// SMART SCRAPING ENGINE WITH AUTO-MAPPING
+// SMART SCRAPING ENGINE
 // ==========================================
 async function scrapeSite(baseUrl, canonicalMarketId) {
     try {
@@ -82,7 +81,7 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
         
         if (!csrfToken || !rawSnapshot) return { success: false, error: 'Gagal ambil token/snapshot' };
 
-        // Step 2: Post Livewire Update dengan ID Canonical
+        // Step 2: Post Livewire Update
         const payload = {
             _token: csrfToken,
             components: [{
@@ -101,20 +100,10 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
             }
         });
 
-        // Step 3: DETEKSI NAMA PASARAN ASLI DARI HTML RESPONSE
-        // Ini kunci agar sistem tahu apakah ID 32 itu Singapore 4D atau Toto di situs ini
+        // Step 3: Ekstrak Data Menggunakan REGEX
         const htmlContent = updateRes.data.components[0].effects.html;
-        const $html = cheerio.load(htmlContent);
-        
-        // Cari teks pasaran di baris pertama hasil (biasanya ada di kolom pertama)
-        let actualMarketName = '';
-        const firstRow = $html('div.flex.overflow-hidden.border.rounded-lg').first();
-        if (firstRow.length > 0) {
-            actualMarketName = firstRow.find('div').first().text().trim().toUpperCase();
-        }
-
-        // Step 4: Ekstrak Data Menggunakan REGEX
         const plainText = htmlContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+        
         const results = [];
         const seenDates = new Set();
 
@@ -134,12 +123,7 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
             }
         }
 
-        // Return data BESERTA nama pasaran asli yang terdeteksi
-        return { 
-            success: true, 
-            data: results,
-            actualMarketName: actualMarketName 
-        };
+        return { success: true, data: results };
 
     } catch (err) {
         return { 
@@ -150,33 +134,32 @@ async function scrapeSite(baseUrl, canonicalMarketId) {
 }
 
 // ==========================================
-// UNIVERSAL MAJORITY VOTE VALIDATION
-// Membandingkan berdasarkan CANONICAL NAME, bukan ID
+// MAJORITY VOTE VALIDATION (FIXED TYPO)
 // ==========================================
 function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
     const issues = [];
     
+    // Filter situs yang berhasil fetch DAN punya data > 0
     const validSites = siteResults.filter(r => r.success && r.data.length > 0);
     const failedOrEmptySites = siteResults.filter(r => !r.success || r.data.length === 0);
 
     if (validSites.length === 0) return issues;
 
-    // Kumpulkan semua tanggal unik HANYA dari situs yang valid
     const allDates = new Set();
     validSites.forEach(res => res.data.forEach(item => allDates.add(item.date)));
 
     for (const dateNorm of allDates) {
+        // PERBAIKAN DI SINI: Menggunakan 'res' bukan 'r'
         const entries = siteResults.map((res, idx) => ({
             domain: getDomainName(siteUrls[idx]),
             success: res.success,
-            hasData: res.success && r.data.length > 0,
-            item: res.success ? res.data.find(d => d.date === dateNorm) : null,
-            actualName: res.actualMarketName || '' // Simpan nama asli untuk debugging
+            hasData: res.success && res.data.length > 0, // Fixed: r -> res
+            item: res.success ? res.data.find(d => d.date === dateNorm) : null
         }));
 
         const presentSites = entries.filter(e => e.item);
-        const missingSites = entries.filter(e => !e.item && e.success && e.data.length > 0);
-        const failedSites = entries.filter(e => !e.success || (e.success && e.data.length === 0));
+        const missingSites = entries.filter(e => !e.item && e.hasData);
+        const failedSites = entries.filter(e => !e.success || !e.hasData);
 
         // SKENARIO 1: Semua situs gagal
         if (failedSites.length > 0 && presentSites.length === 0) {
@@ -258,16 +241,13 @@ app.get('/scan-final', async (req, res) => {
     const startTime = Date.now();
     const allIssues = [];
 
-    // Loop berdasarkan CANONICAL MARKETS (Standar Kita)
     for (const market of CANONICAL_MARKETS) {
         console.log(`   Checking Canonical: ${market.name} (ID: ${market.id})...`);
 
-        // Fetch semua situs paralel untuk market canonical ini
         const siteResults = await Promise.all(
             urls.map(url => scrapeSite(url, market.id))
         );
 
-        // Validasi menggunakan nama canonical, bukan nama dari situs
         const marketIssues = validateWithMajorityVote(market.name, siteResults, urls);
         allIssues.push(...marketIssues);
         
