@@ -55,11 +55,11 @@ const normalizeDate = (str) => {
 };
 
 // ==========================================
-// BRUTE FORCE MARKET MAPPING ENGINE
-// Membandingkan tanggal pertama untuk menentukan mapping yang benar
+// SILENT AUTO-CORRECTION ENGINE
+// Mendeteksi dan memperbaiki mapping ID secara diam-diam
 // ==========================================
-async function detectMarketMapping(baseUrl) {
-    const mapping = { '32': '32', '47': '47' }; // Default: Normal
+async function detectAndFixMapping(baseUrl) {
+    const mapping = { '32': '32', '47': '47' }; // Default Normal
     
     try {
         const fixedBase = fixUrl(baseUrl);
@@ -83,7 +83,7 @@ async function detectMarketMapping(baseUrl) {
         
         if (!csrfToken || !rawSnapshot) return mapping;
 
-        // Fungsi helper untuk extract tanggal pertama dari response
+        // Fungsi helper untuk extract tanggal pertama
         const getFirstDate = async (marketId) => {
             const payload = {
                 _token: csrfToken,
@@ -115,26 +115,26 @@ async function detectMarketMapping(baseUrl) {
             }
         };
 
-        // TES BRUTE FORCE:
-        // Ambil tanggal pertama dari ID 32 dan ID 47
+        // TES BRUTE FORCE: Bandingkan tanggal pertama ID 32 vs 47
         const dateFrom32 = await getFirstDate('32');
         const dateFrom47 = await getFirstDate('47');
 
-        console.log(`   🔍 Testing ${getDomainName(baseUrl)}: ID32->${dateFrom32}, ID47->${dateFrom47}`);
-
-        // LOGIKA DETEKSI:
-        // Jika kedua ID mengembalikan tanggal PERTAMA yang SAMA, berarti situs ini hanya punya 1 jenis Singapore
-        // dan ID lainnya kosong/error. Ini kasus langka, kita pakai default.
+        // LOGIKA SILENT FIX:
+        // Kita asumsikan mayoritas situs adalah NORMAL (32=4D, 47=Toto).
+        // Tapi karena kita scan per-situs, kita butuh cara deteksi tanpa referensi eksternal.
+        // 
+        // STRATEGI BARU: 
+        // Kita tidak bisa tahu mana yang "benar" hanya dari 1 situs.
+        // TAPI, kita bisa menyimpan "sidik jari" tanggal ini.
+        // Nanti saat validasi majority vote, jika tanggalnya beda dari mayoritas, 
+        // kita tahu situs ini swapped DAN kita sudah punya data dari ID satunya.
         
-        // Tapi jika tanggalnya BEDA, kita perlu tahu mana yang "4D" dan mana yang "Toto"
-        // Karena kita tidak bisa bedakan dari tanggal saja, kita asumsikan:
-        // - Situs mayoritas (karturumus, prediksitanjung, dll) = NORMAL (32=4D, 47=Toto)
-        // - Jika situs ini memberikan hasil yang CONSISTENTLY berbeda dari mayoritas saat scanning nanti,
-        //   maka dia SWAPPED.
-        
-        // UNTUK SEKARANG: Kita simpan tanggal referensi ini untuk validasi nanti
-        mapping._refDate32 = dateFrom32;
-        mapping._refDate47 = dateFrom47;
+        // SIMPAN REFERENSI DI MAPPING OBJECT
+        mapping._date32 = dateFrom32;
+        mapping._date47 = dateFrom47;
+        mapping._csrf = csrfToken;
+        mapping._snapshot = rawSnapshot;
+        mapping._clientConfig = { fixedBase, jar, agent }; // Simpan config client untuk reuse
 
         return mapping;
 
@@ -145,38 +145,83 @@ async function detectMarketMapping(baseUrl) {
 }
 
 // ==========================================
-// SMART SCRAPING ENGINE
+// SMART SCRAPING WITH AUTO-CORRECTION
 // ==========================================
-async function scrapeSite(baseUrl, canonicalMarketId, siteMapping) {
+async function scrapeSite(baseUrl, canonicalMarketId, siteMapping, allSiteMappings) {
     try {
         const fixedBase = fixUrl(baseUrl);
+        const domain = getDomainName(baseUrl);
         
-        // Gunakan ID yang sudah dipetakan jika ada
-        const actualId = (siteMapping && siteMapping[String(canonicalMarketId)]) 
-                         ? siteMapping[String(canonicalMarketId)] 
-                         : String(canonicalMarketId);
-
-        const jar = new CookieJar();
-        const agent = new HttpsCookieAgent({ cookies: { jar } });
+        // Default ID
+        let actualId = String(canonicalMarketId);
         
-        const client = axiosBase.create({
-            httpsAgent: agent,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                'Accept': 'text/html,application/xhtml+xml'
-            },
-            timeout: 15000
-        });
+        // LOGIKA AUTO-CORRECTION REAL-TIME
+        // Khusus untuk Singapore (32 & 47), cek apakah situs ini swapped berdasarkan perbandingan dengan situs lain
+        if ((canonicalMarketId === '32' || canonicalMarketId === '47') && allSiteMappings) {
+            
+            // Kumpulkan tanggal pertama dari semua situs yang sudah dideteksi
+            const refDates = [];
+            Object.values(allSiteMappings).forEach(m => {
+                if (m._date32 && m._date47) {
+                    // Ambil tanggal dari ID yang sesuai canonical
+                    refDates.push(canonicalMarketId === '32' ? m._date32 : m._date47);
+                }
+            });
 
-        // Step 1: Get Fresh Session & Token
-        const initRes = await client.get(`${fixedBase}/data-keluaran`);
-        const $init = cheerio.load(initRes.data);
-        const csrfToken = $init('meta[name="csrf-token"]').attr('content');
-        const rawSnapshot = $init('[wire\\:id]').first().attr('wire:snapshot');
+            if (refDates.length > 0) {
+                // Cari tanggal mayoritas
+                const dateCounts = {};
+                refDates.forEach(d => dateCounts[d] = (dateCounts[d] || 0) + 1);
+                const majorityDate = Object.keys(dateCounts).reduce((a, b) => dateCounts[a] > dateCounts[b] ? a : b);
+                
+                // Cek tanggal situs ini
+                const myDate = canonicalMarketId === '32' ? siteMapping._date32 : siteMapping._date47;
+                
+                // Jika beda dari mayoritas -> SWAPPED! Gunakan ID sebaliknya
+                if (myDate && myDate !== majorityDate) {
+                    actualId = canonicalMarketId === '32' ? '47' : '32';
+                    console.log(`   🔧 Auto-corrected ${domain}: Using ID ${actualId} for Canonical ${canonicalMarketId}`);
+                }
+            }
+        }
+
+        // Reuse client config jika ada (hemat resource)
+        let client;
+        let csrfToken = siteMapping._csrf;
+        let rawSnapshot = siteMapping._snapshot;
+
+        if (siteMapping._clientConfig) {
+            client = axiosBase.create({
+                httpsAgent: siteMapping._clientConfig.agent,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html,application/xhtml+xml'
+                },
+                timeout: 15000
+            });
+        } else {
+            // Fallback: buat client baru
+            const jar = new CookieJar();
+            const agent = new HttpsCookieAgent({ cookies: { jar } });
+            client = axiosBase.create({
+                httpsAgent: agent,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'text/html,application/xhtml+xml'
+                },
+                timeout: 15000
+            });
+            
+            // Ambil token baru jika tidak ada di mapping
+            const initRes = await client.get(`${fixedBase}/data-keluaran`);
+            const $init = cheerio.load(initRes.data);
+            csrfToken = $init('meta[name="csrf-token"]').attr('content');
+            rawSnapshot = $init('[wire\\:id]').first().attr('wire:snapshot');
+        }
         
         if (!csrfToken || !rawSnapshot) return { success: false, error: 'Gagal ambil token/snapshot' };
 
-        // Step 2: Post Livewire Update dengan ACTUAL ID
+        // Post Livewire Update dengan ACTUAL ID (yang sudah dikoreksi)
         const payload = {
             _token: csrfToken,
             components: [{
@@ -195,7 +240,7 @@ async function scrapeSite(baseUrl, canonicalMarketId, siteMapping) {
             }
         });
 
-        // Step 3: Ekstrak Data Menggunakan REGEX
+        // Ekstrak Data Menggunakan REGEX
         const htmlContent = updateRes.data.components[0].effects.html;
         const plainText = htmlContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
         
@@ -229,46 +274,16 @@ async function scrapeSite(baseUrl, canonicalMarketId, siteMapping) {
 }
 
 // ==========================================
-// ADAPTIVE MAJORITY VOTE VALIDATION
-// Mendeteksi dan memperbaiki swapped sites secara real-time
+// CLEAN MAJORITY VOTE VALIDATION
+// Hanya laporkan Missing, Mismatch, Failed. Tidak ada Swapped.
 // ==========================================
-function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls, siteMappings) {
+function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
     const issues = [];
     
     const validSites = siteResults.filter(r => r.success && r.data.length > 0);
     const failedOrEmptySites = siteResults.filter(r => !r.success || r.data.length === 0);
 
     if (validSites.length === 0) return issues;
-
-    // Khusus untuk Singapore (ID 32 & 47), lakukan deteksi swapped real-time
-    const isSingapore = canonicalMarketName.includes('Singapore');
-    let swappedSites = new Set();
-
-    if (isSingapore && validSites.length >= 2) {
-        // Kumpulkan tanggal pertama dari semua situs valid
-        const firstDates = validSites.map((res, idx) => ({
-            idx,
-            domain: getDomainName(siteUrls[idx]),
-            firstDate: res.data[0]?.date || null
-        })).filter(d => d.firstDate);
-
-        // Cari tanggal yang paling umum (majority)
-        const dateCounts = {};
-        firstDates.forEach(d => {
-            dateCounts[d.firstDate] = (dateCounts[d.firstDate] || 0) + 1;
-        });
-        
-        const majorityDate = Object.keys(dateCounts).reduce((a, b) => dateCounts[a] > dateCounts[b] ? a : b);
-        const majorityCount = dateCounts[majorityDate];
-
-        // Situs yang tanggal pertamanya BEDA dari majority = SWAPPED
-        firstDates.forEach(d => {
-            if (d.firstDate !== majorityDate && majorityCount >= 2) {
-                console.log(`   ⚠️ Detected SWAPPED site: ${d.domain} (${canonicalMarketName})`);
-                swappedSites.add(d.idx);
-            }
-        });
-    }
 
     const allDates = new Set();
     validSites.forEach(res => res.data.forEach(item => allDates.add(item.date)));
@@ -278,30 +293,14 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls, si
             domain: getDomainName(siteUrls[idx]),
             success: res.success,
             hasData: res.success && res.data.length > 0,
-            item: res.success ? res.data.find(d => d.date === dateNorm) : null,
-            isSwapped: swappedSites.has(idx)
+            item: res.success ? res.data.find(d => d.date === dateNorm) : null
         }));
 
-        // Untuk situs yang swapped, kita SKIP validasinya karena datanya memang dari pasaran lain
-        const presentSites = entries.filter(e => e.item && !e.isSwapped);
-        const missingSites = entries.filter(e => !e.item && e.hasData && !e.isSwapped);
-        const failedSites = entries.filter(e => (!e.success || !e.hasData) && !e.isSwapped);
-        const swappedEntries = entries.filter(e => e.isSwapped);
+        const presentSites = entries.filter(e => e.item);
+        const missingSites = entries.filter(e => !e.item && e.hasData);
+        const failedSites = entries.filter(e => !e.success || !e.hasData);
 
-        // Laporkan situs swapped sebagai warning khusus
-        if (swappedEntries.length > 0 && canonicalMarketName === 'Singapore 4D') {
-            swappedEntries.forEach(se => {
-                issues.push({
-                    market: canonicalMarketName,
-                    date: dateNorm,
-                    culprit: se.domain,
-                    status: 'MARKET_SWAPPED',
-                    reference: 'Situs ini memiliki ID Singapore yang terbalik (32=Toto, 47=4D)',
-                    detail: `Data yang ditampilkan sebenarnya adalah Singapore Toto, bukan Singapore 4D.`
-                });
-            });
-        }
-
+        // SKENARIO 1: Semua gagal
         if (failedSites.length > 0 && presentSites.length === 0) {
             failedSites.forEach(fs => {
                 issues.push({
@@ -312,6 +311,7 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls, si
             continue; 
         }
 
+        // SKENARIO 2: Minority Missing
         if (missingSites.length > 0 && presentSites.length >= (siteResults.length / 2)) {
             missingSites.forEach(ms => {
                 issues.push({
@@ -323,6 +323,7 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls, si
             });
         }
 
+        // SKENARIO 3: Cek Prize/Hari
         if (presentSites.length >= 2) {
             const dayCounts = {};
             const prizeCounts = {};
@@ -351,6 +352,7 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls, si
         }
     }
 
+    // SKENARIO 4: Situs Kosong Total
     failedOrEmptySites.forEach(fes => {
         if (validSites.length > 0) {
             issues.push({
@@ -374,34 +376,36 @@ app.get('/scan-final', async (req, res) => {
         return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan (?url1=...&url2=...)' });
     }
 
-    console.log(` Universal Scan Started | ${urls.length} sites × 64 markets`);
+    console.log(` Silent Auto-Correct Scan Started | ${urls.length} sites × 64 markets`);
     const startTime = Date.now();
     const allIssues = [];
 
     // LANGKAH 0: DETEKSI MAPPING UNTUK SETIAP SITUS
-    console.log(` 🔍 Detecting market mappings for ${urls.length} sites...`);
+    console.log(` 🔍 Detecting market fingerprints...`);
     const siteMappings = {};
     
     for (const url of urls) {
         const domain = getDomainName(url);
-        const mapping = await detectMarketMapping(url);
+        const mapping = await detectAndFixMapping(url);
         siteMappings[domain] = mapping || {};
-        console.log(`   ✅ Mapping ready for ${domain}`);
+        console.log(`   ✅ Fingerprint ready for ${domain}`);
     }
 
-    // LANGKAH 1: SCANNING DENGAN MAPPING
+    // LANGKAH 1: SCANNING DENGAN AUTO-CORRECTION
     for (const market of CANONICAL_MARKETS) {
-        console.log(`   Checking Canonical: ${market.name} (ID: ${market.id})...`);
+        console.log(`   Checking: ${market.name} (ID: ${market.id})...`);
 
+        // Fetch semua situs paralel, masing-masing pakai auto-correction
         const siteResults = await Promise.all(
             urls.map(url => {
                 const domain = getDomainName(url);
                 const mapping = siteMappings[domain];
-                return scrapeSite(url, market.id, mapping);
+                return scrapeSite(url, market.id, mapping, siteMappings); // Pass allSiteMappings untuk referensi
             })
         );
 
-        const marketIssues = validateWithMajorityVote(market.name, siteResults, urls, siteMappings);
+        // Validasi bersih (tanpa laporan swapped)
+        const marketIssues = validateWithMajorityVote(market.name, siteResults, urls);
         allIssues.push(...marketIssues);
         
         await new Promise(r => setTimeout(r, 1200));
@@ -418,11 +422,11 @@ app.get('/scan-final', async (req, res) => {
             total_issues_found: allIssues.length,
             is_fully_synced: allIssues.length === 0
         },
-        errors: allIssues
+        errors: allIssues // HANYA BERISI MISSING, MISMATCH, FAILED
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '🧠 Adaptive Market Mapper Ready!' }));
+app.get('/', (req, res) => res.json({ message: '🤫 Silent Auto-Corrector Ready!' }));
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
