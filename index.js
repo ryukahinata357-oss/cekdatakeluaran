@@ -4,61 +4,66 @@ const cheerio = require('cheerio');
 const cors = require('cors');
 
 const app = express();
-app.use(cors()); // Wajib agar bisa diakses dari browser/domain lain
+app.use(cors());
 
 // ==========================================
-// MAPPING PASARAN (ID ke Nama)
+// DATABASE PASARAN (ID 1-64)
 // ==========================================
-const MARKET_MAP = {
-    '1': 'Roma', '2': 'Kentucky Mid', '3': 'Turin', '4': 'Florida Mid',
-    '5': 'Newyork Mid', '6': 'Carolina Day', '7': 'Madrid', '8': 'Bulgaria',
-    '9': 'Oregon 03', '10': 'Hungary', '11': 'Miami', '12': 'Oregon 06',
-    '13': 'California', '14': 'Florida Eve', '15': 'Oregon 09', '16': 'Newyork Eve',
-    '17': 'Kentucky Eve', '18': 'Austria', '19': 'Carolina Eve', '20': 'Cambodia',
-    '21': 'Bullseye', '22': 'Laos', '23': 'Oregon 12', '24': 'Toto Macau P1',
-    '25': 'Sydney', '26': 'Guangdong', '27': 'China', '28': 'Toto Macau 5D P1',
-    '29': 'Toto Macau P2', '30': 'Philippines', '31': 'Japan', '32': 'Singapore 4D',
-    '33': 'Jeju Lotto', '34': 'Toto Beijing', '35': 'Toto Macau P3', '36': 'Toto Fuzhou',
-    '37': 'Cyprus', '38': 'Taiwan', '39': 'Toto Macau 5D P2', '40': 'Iceland',
-    '41': 'Toto Macau P4', '42': 'Bhutan', '43': 'Hongkong', '44': 'Toto Macau P5',
-    '45': 'Toronto', '46': 'Toto Macau P6', '47': 'Singapore Toto', '48': 'Kingkong P1',
-    '49': 'Kingkong P2', '50': 'Chengdu', '51': 'Chongqing', '52': 'Cuba',
-    '53': 'Denver', '54': 'Ecuador', '55': 'Foshan', '56': 'Haiti',
-    '57': 'Kowloon', '58': 'Monaco', '59': 'Taichung', '60': 'Italy',
-    '61': 'France', '62': 'Chile', '63': 'Mexico', '64': 'Oslo'
-};
+const MARKETS = [
+    { id: '1', name: 'Roma' }, { id: '2', name: 'Kentucky Mid' }, { id: '3', name: 'Turin' },
+    { id: '4', name: 'Florida Mid' }, { id: '5', name: 'Newyork Mid' }, { id: '6', name: 'Carolina Day' },
+    { id: '7', name: 'Madrid' }, { id: '8', name: 'Bulgaria' }, { id: '9', name: 'Oregon 03' },
+    { id: '10', name: 'Hungary' }, { id: '11', name: 'Miami' }, { id: '12', name: 'Oregon 06' },
+    { id: '13', name: 'California' }, { id: '14', name: 'Florida Eve' }, { id: '15', name: 'Oregon 09' },
+    { id: '16', name: 'Newyork Eve' }, { id: '17', name: 'Kentucky Eve' }, { id: '18', name: 'Austria' },
+    { id: '19', name: 'Carolina Eve' }, { id: '20', name: 'Cambodia' }, { id: '21', name: 'Bullseye' },
+    { id: '22', name: 'Laos' }, { id: '23', name: 'Oregon 12' }, { id: '24', name: 'Toto Macau P1' },
+    { id: '25', name: 'Sydney' }, { id: '26', name: 'Guangdong' }, { id: '27', name: 'China' },
+    { id: '28', name: 'Toto Macau 5D P1' }, { id: '29', name: 'Toto Macau P2' }, { id: '30', name: 'Philippines' },
+    { id: '31', name: 'Japan' }, { id: '32', name: 'Singapore 4D' }, { id: '33', name: 'Jeju Lotto' },
+    { id: '34', name: 'Toto Beijing' }, { id: '35', name: 'Toto Macau P3' }, { id: '36', name: 'Toto Fuzhou' },
+    { id: '37', name: 'Cyprus' }, { id: '38', name: 'Taiwan' }, { id: '39', name: 'Toto Macau 5D P2' },
+    { id: '40', name: 'Iceland' }, { id: '41', name: 'Toto Macau P4' }, { id: '42', name: 'Bhutan' },
+    { id: '43', name: 'Hongkong' }, { id: '44', name: 'Toto Macau P5' }, { id: '45', name: 'Toronto' },
+    { id: '46', name: 'Toto Macau P6' }, { id: '47', name: 'Singapore Toto' }, { id: '48', name: 'Kingkong P1' },
+    { id: '49', name: 'Kingkong P2' }, { id: '50', name: 'Chengdu' }, { id: '51', name: 'Chongqing' },
+    { id: '52', name: 'Cuba' }, { id: '53', name: 'Denver' }, { id: '54', name: 'Ecuador' },
+    { id: '55', name: 'Foshan' }, { id: '56', name: 'Haiti' }, { id: '57', name: 'Kowloon' },
+    { id: '58', name: 'Monaco' }, { id: '59', name: 'Taichung' }, { id: '60', name: 'Italy' },
+    { id: '61', name: 'France' }, { id: '62', name: 'Chile' }, { id: '63', name: 'Mexico' },
+    { id: '64', name: 'Oslo' }
+];
 
-// Helper: Membersihkan string agar perbandingan akurat
+// Helper: Normalisasi string
 const clean = (str) => String(str || '').replace(/\s+/g, '').toLowerCase();
 
 // ==========================================
-// FUNGSI SCRAPING UNIVERSAL
+// FUNGSI SCRAPING PER MARKET
 // ==========================================
-async function scrapeData(url) {
+async function scrapeMarketData(baseUrl, marketId) {
     try {
+        // Otomatis tambahkan path data-keluaran
+        const url = `${baseUrl.replace(/\/$/, '')}/data-keluaran?market=${marketId}`;
+        
         const { data } = await axios.get(url, { 
             headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            timeout: 15000 
+            timeout: 10000 
         });
 
         const $ = cheerio.load(data);
         const results = [];
 
-        // LOGIC PARSING TABLE TOGEL
-        // Mencari baris yang memiliki pola angka 4 digit (Prize)
+        // Parsing struktur tabel Livewire/Togel
         $('div.flex.overflow-hidden.border.rounded-lg, tr').each((i, el) => {
             const text = $(el).text();
             if (/\b\d{4}\b/.test(text)) {
                 const cols = $(el).find('div, td');
-                
-                // Ekstraksi kolom (Sesuaikan index jika struktur HTML beda)
-                let marketId = clean($(cols[0]).text()).replace(/[^a-z0-9]/g, '');
-                let day = clean($(cols[1]).text());
-                let date = clean($(cols[2]).text());
-                let prize = clean($(cols[3]).find('b').text() || $(cols[3]).text());
-
-                if (marketId && date && prize) {
-                    results.push({ marketId, day, date, prize });
+                if (cols.length >= 4) {
+                    results.push({
+                        day: clean($(cols[1]).text()),
+                        date: clean($(cols[2]).text()),
+                        prize: clean($(cols[3]).find('b').text() || $(cols[3]).text())
+                    });
                 }
             }
         });
@@ -70,98 +75,93 @@ async function scrapeData(url) {
 }
 
 // ==========================================
-// ENDPOINT GET: /compare
+// ENDPOINT UTAMA: /scan-all
 // ==========================================
-app.get('/compare', async (req, res) => {
+app.get('/scan-all', async (req, res) => {
     const { url1, url2 } = req.query;
 
-    // Validasi Input
     if (!url1 || !url2) {
         return res.status(400).json({ 
             status: 'error', 
-            message: 'Harap sertakan ?url1=...&url2=... di alamat URL.' 
+            message: 'Wajib isi ?url1=domain1.com&url2=domain2.com' 
         });
     }
 
-    console.log(`🔍 Membandingkan: ${url1} vs ${url2}`);
+    console.log(`🚀 Memulai Full Scan 64 Pasaran...`);
+    const issues = []; // Hanya simpan yang bermasalah
+    let processedCount = 0;
 
-    // 1. Ambil data kedua situs secara bersamaan (Paralel)
-    const [res1, res2] = await Promise.all([
-        scrapeData(url1),
-        scrapeData(url2)
-    ]);
+    // Loop semua market dengan delay anti-blokir
+    for (const market of MARKETS) {
+        processedCount++;
+        console.log(`[${processedCount}/64] Scanning ${market.name}...`);
 
-    // Cek jika ada yang gagal scraping
-    if (!res1.success || !res2.success) {
-        return res.status(502).json({
-            status: 'error',
-            message: 'Gagal mengambil data dari situs.',
-            details: { 
-                site1_error: res1.error, 
-                site2_error: res2.error 
-            }
-        });
-    }
+        // Ambil data dari kedua situs secara paralel
+        const [res1, res2] = await Promise.all([
+            scrapeMarketData(url1, market.id),
+            scrapeMarketData(url2, market.id)
+        ]);
 
-    // 2. LOGIC PERBANDINGAN (MATCHING ENGINE)
-    const report = [];
-    let matchCount = 0;
-    let mismatchCount = 0;
-
-    res1.data.forEach(item1 => {
-        // Cari pasangan di situs 2 berdasarkan Market ID + Tanggal
-        const item2 = res2.data.find(i2 => 
-            i2.marketId === item1.marketId && i2.date === item1.date
-        );
-
-        let status = 'MATCH';
-        let diffs = [];
-
-        if (!item2) {
-            status = 'MISSING_IN_SITE2';
-            mismatchCount++;
-        } else {
-            // Cek Hari
-            if (item1.day !== item2.day) {
-                diffs.push({ field: 'hari', val1: item1.day, val2: item2.day });
-            }
-            // Cek Prize
-            if (item1.prize !== item2.prize) {
-                diffs.push({ field: 'prize_1', val1: item1.prize, val2: item2.prize });
-            }
-
-            if (diffs.length > 0) {
-                status = 'MISMATCH';
-                mismatchCount++;
-            } else {
-                matchCount++;
-            }
+        // Jika salah satu gagal scraping, catat sebagai error
+        if (!res1.success || !res2.success) {
+            issues.push({
+                market: market.name,
+                market_id: market.id,
+                status: 'SCRAPE_ERROR',
+                detail: `Site1: ${res1.error || 'OK'} | Site2: ${res2.error || 'OK'}`
+            });
+            continue;
         }
 
-        report.push({
-            market_name: MARKET_MAP[item1.marketId] || item1.marketId,
-            date: item1.date,
-            status,
-            differences: diffs
-        });
-    });
+        // Bandingkan data per tanggal
+        res1.data.forEach(item1 => {
+            const item2 = res2.data.find(i2 => i2.date === item1.date);
 
-    // 3. Kirim Response JSON
+            if (!item2) {
+                // Data hilang di site2
+                issues.push({
+                    market: market.name,
+                    date: item1.date,
+                    status: 'MISSING_IN_SITE2',
+                    detail: `Data tanggal ${item1.date} tidak ada di situs 2`
+                });
+            } else {
+                // Cek perbedaan Hari & Prize
+                const diffs = [];
+                if (item1.day !== item2.day) diffs.push(`Hari: "${item1.day}" vs "${item2.day}"`);
+                if (item1.prize !== item2.prize) diffs.push(`Prize: "${item1.prize}" vs "${item2.prize}"`);
+
+                // HANYA PUSH JIKA ADA PERBEDAAN
+                if (diffs.length > 0) {
+                    issues.push({
+                        market: market.name,
+                        date: item1.date,
+                        status: 'MISMATCH',
+                        detail: diffs.join(' | ')
+                    });
+                }
+            }
+        });
+
+        // Delay 1 detik antar market agar tidak kena rate limit
+        await new Promise(r => setTimeout(r, 1000));
+    }
+
+    // Kirim Response Bersih (Hanya Error)
     res.json({
         status: 'success',
         summary: {
-            total_data: report.length,
-            match: matchCount,
-            mismatch: mismatchCount,
-            is_synced: mismatchCount === 0
+            total_markets_scanned: 64,
+            total_issues_found: issues.length,
+            is_perfect_sync: issues.length === 0
         },
-        results: report
+        // Array ini hanya berisi masalah, kosong jika semua aman
+        errors: issues 
     });
 });
 
 // Health Check
-app.get('/', (req, res) => res.json({ message: 'API Comparator Aktif!' }));
+app.get('/', (req, res) => res.json({ message: 'Auto Scanner API Ready!' }));
 
-// Jalankan Server
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(` API berjalan di port ${PORT}`));
+app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
