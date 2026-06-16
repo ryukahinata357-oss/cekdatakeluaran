@@ -1,6 +1,6 @@
 {
-  "name": "livewire-togel-scanner-final",
-  "version": "1.0.0",
+  "name": "smart-togel-validator",
+  "version": "2.0.0",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
