@@ -52,25 +52,46 @@ async function scrapeSite(baseUrl, marketId) {
     try {
         const url = `${fixUrl(baseUrl)}/data-keluaran?market=${marketId}`;
         const { data } = await axios.get(url, { 
-            headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-            timeout: REQUEST_TIMEOUT 
+            headers: { 
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Accept': 'text/html,application/xhtml+xml'
+            },
+            timeout: 15000 
         });
 
         const $ = cheerio.load(data);
         const results = [];
 
-        $('div.flex.overflow-hidden.border.rounded-lg, tr').each((i, el) => {
-            if (/\b\d{4}\b/.test($(el).text())) {
-                const cols = $(el).find('div, td');
-                if (cols.length >= 4) {
-                    results.push({
-                        day: clean($(cols[1]).text()),
-                        date: clean($(cols[2]).text()),
-                        prize: clean($(cols[3]).find('b').text() || $(cols[3]).text())
-                    });
+        // STRUKTUR DARI SOURCE CODE KAMU:
+        // Setiap baris ada di dalam: div.flex.overflow-hidden.border.rounded-lg
+        // Kolom Prize ada di div ke-4 (index 3), dan angkanya ada di dalam tag <b>
+        
+        $('div.flex.overflow-hidden.border.rounded-lg').each((i, el) => {
+            const cols = $(el).find('div');
+            
+            // Pastikan ada minimal 5 kolom (Pasaran, Hari, Tanggal, Prize, Jam)
+            if (cols.length >= 5) {
+                
+                // EKSTRAK PRIZE DENGAN CARA PALING AMAN
+                // Langsung cari tag <b> di dalam kolom ke-4 (index 3)
+                let prize = $(cols[3]).find('b').text().trim();
+                
+                // Fallback: kalau <b> kosong, cari angka 4 digit apapun di kolom tersebut
+                if (!prize || prize.length !== 4) {
+                    const match = $(cols[3]).text().match(/\d{4}/);
+                    prize = match ? match[0] : '';
+                }
+
+                let day = $(cols[1]).text().trim().toLowerCase().replace(/\s+/g, '');
+                let date = $(cols[2]).text().trim().toLowerCase().replace(/\s+/g, '');
+
+                // Hanya simpan jika data lengkap dan valid
+                if (day && date && prize && prize.length === 4) {
+                    results.push({ day, date, prize });
                 }
             }
         });
+
         return { success: true, data: results };
     } catch (err) {
         return { success: false, error: err.code === 'ECONNABORTED' ? 'Timeout' : err.message };
