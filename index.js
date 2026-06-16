@@ -254,7 +254,7 @@ async function scrapeSite(baseUrl, canonicalMarketId, siteMapping, allSiteMappin
         const results = [];
         const seenDates = new Set();
 
-        const regex = /\b(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{2})\s+(\d{4})\b/gi;
+        const regex = /\b(Senin|Selasa|Rabu|Kamis|Jumat|Sabtu|Minggu)\s+(\d{1,2}\s+[A-Za-z]{3}\s+\d{2})\s+(\d{4,5})\b/gi;
         let match;
         while ((match = regex.exec(plainText)) !== null) {
             const dayRaw = match[1];
@@ -264,11 +264,11 @@ async function scrapeSite(baseUrl, canonicalMarketId, siteMapping, allSiteMappin
             const dayNorm = dayRaw.toLowerCase().replace(/\s+/g, '');
             const dateNorm = normalizeDate(dateRaw);
 
-            if (dayNorm && dateNorm && prize && !seenDates.has(dateNorm)) {
-                seenDates.add(dateNorm);
-                results.push({ day: dayNorm, date: dateNorm, prize });
-            }
-        }
+            if (dayNorm && dateNorm && prize && (prize.length === 4 || prize.length === 5) && !seenDates.has(dateNorm)) {
+        seenDates.add(dateNorm);
+        results.push({ day: dayNorm, date: dateNorm, prize });
+    }
+// }
 
         return { success: true, data: results };
 
