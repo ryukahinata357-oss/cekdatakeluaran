@@ -7,10 +7,8 @@ const app = express();
 app.use(cors());
 
 // ==========================================
-// KONFIGURASI & DATABASE PASARAN
+// DATABASE PASARAN (ID 1-64)
 // ==========================================
-const REQUEST_TIMEOUT = 12000; // Timeout sedikit lebih lama untuk akurasi
-
 const MARKETS = [
     { id: '1', name: 'Roma' }, { id: '2', name: 'Kentucky Mid' }, { id: '3', name: 'Turin' },
     { id: '4', name: 'Florida Mid' }, { id: '5', name: 'Newyork Mid' }, { id: '6', name: 'Carolina Day' },
@@ -46,37 +44,66 @@ const fixUrl = (raw) => {
 const clean = (str) => String(str || '').replace(/\s+/g, '').toLowerCase();
 
 // ==========================================
-// SCRAPING ENGINE
+// CORE ENGINE: 2-STEP LIVEWIRE SCRAPING
 // ==========================================
 async function scrapeSite(baseUrl, marketId) {
     try {
-        const url = `${fixUrl(baseUrl)}/data-keluaran?market=${marketId}`;
-        const { data } = await axios.get(url, { 
+        const fixedBase = fixUrl(baseUrl);
+        
+        // LANGKAH 1: Ambil Halaman Utama untuk Token & Snapshot Segar
+        // Ini WAJIB agar tidak kena 419 Page Expired saat looping 64 market
+        const initRes = await axios.get(`${fixedBase}/data-keluaran`, {
             headers: { 
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/html,application/xhtml+xml'
             },
-            timeout: 15000 
+            timeout: 15000
         });
 
-        const $ = cheerio.load(data);
+        const $init = cheerio.load(initRes.data);
+        const csrfToken = $init('meta[name="csrf-token"]').attr('content');
+        
+        // Ambil wire:snapshot asli dari elemen komponen Livewire di halaman awal
+        const rawSnapshot = $init('[wire\\:id]').first().attr('wire:snapshot');
+        
+        if (!csrfToken || !rawSnapshot) {
+            return { success: false, error: 'Gagal mengambil token/snapshot awal' };
+        }
+
+        // LANGKAH 2: Kirim Request Update ke Livewire API
+        const payload = {
+            _token: csrfToken,
+            components: [{
+                snapshot: rawSnapshot, // Gunakan snapshot SEGAR dari langkah 1
+                updates: { market: String(marketId) }, // Pastikan ID market string
+                calls: []
+            }]
+        };
+
+        const updateRes = await axios.post(`${fixedBase}/livewire/update`, payload, {
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json'
+            },
+            timeout: 15000
+        });
+
+        // LANGKAH 3: Parse HTML dari Response Update
+        const htmlContent = updateRes.data.components[0].effects.html;
+        const $ = cheerio.load(htmlContent);
         const results = [];
 
-        // STRUKTUR DARI SOURCE CODE KAMU:
-        // Setiap baris ada di dalam: div.flex.overflow-hidden.border.rounded-lg
-        // Kolom Prize ada di div ke-4 (index 3), dan angkanya ada di dalam tag <b>
-        
+        // Selector EKSKLUSIF berdasarkan Response JSON yang kamu kirim
         $('div.flex.overflow-hidden.border.rounded-lg').each((i, el) => {
             const cols = $(el).find('div');
             
-            // Pastikan ada minimal 5 kolom (Pasaran, Hari, Tanggal, Prize, Jam)
+            // Validasi struktur kolom (Pasaran, Hari, Tanggal, Prize, Jam)
             if (cols.length >= 5) {
-                
-                // EKSTRAK PRIZE DENGAN CARA PALING AMAN
-                // Langsung cari tag <b> di dalam kolom ke-4 (index 3)
+                // EKSTRAK PRIZE: Wajib cari tag <b> secara langsung
                 let prize = $(cols[3]).find('b').text().trim();
                 
-                // Fallback: kalau <b> kosong, cari angka 4 digit apapun di kolom tersebut
+                // Fallback jika tag <b> kosong/rusak
                 if (!prize || prize.length !== 4) {
                     const match = $(cols[3]).text().match(/\d{4}/);
                     prize = match ? match[0] : '';
@@ -85,7 +112,7 @@ async function scrapeSite(baseUrl, marketId) {
                 let day = $(cols[1]).text().trim().toLowerCase().replace(/\s+/g, '');
                 let date = $(cols[2]).text().trim().toLowerCase().replace(/\s+/g, '');
 
-                // Hanya simpan jika data lengkap dan valid
+                // Hanya simpan data yang lengkap dan valid
                 if (day && date && prize && prize.length === 4) {
                     results.push({ day, date, prize });
                 }
@@ -93,8 +120,12 @@ async function scrapeSite(baseUrl, marketId) {
         });
 
         return { success: true, data: results };
+
     } catch (err) {
-        return { success: false, error: err.code === 'ECONNABORTED' ? 'Timeout' : err.message };
+        return { 
+            success: false, 
+            error: err.code === 'ECONNABORTED' ? 'Timeout' : err.message 
+        };
     }
 }
 
@@ -105,10 +136,10 @@ app.get('/scan-chain', async (req, res) => {
     const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5].filter(Boolean);
     
     if (urls.length < 2) {
-        return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan' });
+        return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan (?url1=...&url2=...)' });
     }
 
-    // Generate Chain Pairs: 1vs2, 2vs3, 3vs4, ..., Lastvs1
+    // Generate Chain Pairs: 1vs2, 2vs3, ..., Lastvs1
     const chainPairs = [];
     for (let i = 0; i < urls.length; i++) {
         const nextIndex = (i + 1) % urls.length;
@@ -120,13 +151,13 @@ app.get('/scan-chain', async (req, res) => {
         });
     }
 
-    console.log(`🔗 Chain Scan | ${urls.length} sites → ${chainPairs.length} links × 64 markets`);
+    console.log(` Chain Scan Started | ${urls.length} sites → ${chainPairs.length} links × 64 markets`);
     const startTime = Date.now();
     const allIssues = [];
 
-    // LOOP SEQUENTIAL PER MARKET (Aman dari rate-limit)
+    // LOOP SEQUENTIAL PER MARKET (Aman dari rate-limit LiteSpeed)
     for (const market of MARKETS) {
-        console.log(`   Checking Market: ${market.name} (${market.id})`);
+        console.log(`   Checking Market: ${market.name} (${market.id})...`);
 
         // 1. Fetch SEMUA SITUS SECARA PARALEL untuk market ini
         const siteResults = await Promise.all(
@@ -175,13 +206,13 @@ app.get('/scan-chain', async (req, res) => {
                     }
                     
                     // Cek Prize (Strict)
-                    if (itemA.prize !== itemB.prize) {
+                    if (String(itemA.prize) !== String(itemB.prize)) {
                         allIssues.push({
                             market: market.name,
                             date: itemA.date,
                             pair: pairLabel,
                             status: 'PRIZE_MISMATCH',
-                            detail: `Prize BEDA! Site${pair.siteA}: "${itemA.prize}" vs Site${pair.siteB}: "${itemB.prize}"`
+                            detail: `Prize BEDA! Site${pair.siteA}: [${itemA.prize}] vs Site${pair.siteB}: [${itemB.prize}]`
                         });
                     }
                 }
@@ -201,6 +232,9 @@ app.get('/scan-chain', async (req, res) => {
                 }
             });
         }
+        
+        // Delay antar market agar IP Railway tidak diblokir LiteSpeed
+        await new Promise(r => setTimeout(r, 1200));
     }
 
     const duration = ((Date.now() - startTime) / 1000).toFixed(2);
@@ -219,7 +253,7 @@ app.get('/scan-chain', async (req, res) => {
     });
 });
 
-app.get('/', (req, res) => res.json({ message: '⛓️ Chain Comparator API Ready!' }));
+app.get('/', (req, res) => res.json({ message: '⛓️ Final Fixed Chain Comparator API Ready!' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(` Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
