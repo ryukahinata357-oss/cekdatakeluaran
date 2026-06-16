@@ -43,10 +43,17 @@ const fixUrl = (raw) => {
 };
 
 const getDomainName = (url) => {
+    if (!url || typeof url !== 'string') return 'Unknown Site';
+    
     try {
-        const u = new URL(fixUrl(url));
-        return u.hostname.replace('www.', '');
-    } catch { return url; }
+        // Bersihkan spasi & tambahkan https:// otomatis
+        const cleanUrl = url.trim().startsWith('http') ? url.trim() : `https://${url.trim()}`;
+        const u = new URL(cleanUrl);
+        return u.hostname.replace('www.', '') || 'Unknown Site';
+    } catch {
+        // Fallback: kembalikan URL yang sudah dibersihkan spasinya
+        return url.trim() || 'Unknown Site';
+    }
 };
 
 const normalizeDate = (str) => {
@@ -370,7 +377,10 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
 // ENDPOINT UTAMA: /scan-final
 // ==========================================
 app.get('/scan-final', async (req, res) => {
-    const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5].filter(Boolean);
+    // Di dalam app.get('/scan-final', ...)
+const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5]
+    .filter(Boolean)
+    .map(u => u.trim()); // <--- TAMBAHKAN .trim() DI SINI!
     
     if (urls.length < 2) {
         return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan (?url1=...&url2=...)' });
