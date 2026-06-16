@@ -1,5 +1,7 @@
 const express = require('express');
-const axios = require('axios');
+const axiosBase = require('axios');
+const { HttpsCookieAgent } = require('http-cookie-agent/http');
+const { CookieJar } = require('tough-cookie');
 const cheerio = require('cheerio');
 const cors = require('cors');
 
@@ -41,69 +43,71 @@ const fixUrl = (raw) => {
     return url.startsWith('http') ? url : `https://${url}`;
 };
 
-const clean = (str) => String(str || '').replace(/\s+/g, '').toLowerCase();
-
 // ==========================================
-// CORE ENGINE: 2-STEP LIVEWIRE SCRAPING
+// CORE ENGINE: SESSION-AWARE LIVEWIRE SCRAPING
+// Mengatasi Error 419 dengan Cookie Jar & Referer Header
 // ==========================================
 async function scrapeSite(baseUrl, marketId) {
     try {
         const fixedBase = fixUrl(baseUrl);
         
-        // LANGKAH 1: Ambil Halaman Utama untuk Token & Snapshot Segar
-        // Ini WAJIB agar tidak kena 419 Page Expired saat looping 64 market
-        const initRes = await axios.get(`${fixedBase}/data-keluaran`, {
-            headers: { 
+        // 1. BUAT COOKIE JAR & AXIOS INSTANCE KHUSUS UNTUK SITUS INI
+        // Ini kuncinya! Cookie dari GET akan otomatis dipakai di POST
+        const jar = new CookieJar();
+        const agent = new HttpsCookieAgent({ cookies: { jar } });
+        
+        const client = axiosBase.create({
+            httpsAgent: agent,
+            headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                 'Accept': 'text/html,application/xhtml+xml'
             },
             timeout: 15000
         });
 
+        // 2. LANGKAH 1: GET HALAMAN UTAMA (Mendapatkan Cookie & Token Segar)
+        const initRes = await client.get(`${fixedBase}/data-keluaran`);
         const $init = cheerio.load(initRes.data);
-        const csrfToken = $init('meta[name="csrf-token"]').attr('content');
         
-        // Ambil wire:snapshot asli dari elemen komponen Livewire di halaman awal
+        const csrfToken = $init('meta[name="csrf-token"]').attr('content');
         const rawSnapshot = $init('[wire\\:id]').first().attr('wire:snapshot');
         
         if (!csrfToken || !rawSnapshot) {
             return { success: false, error: 'Gagal mengambil token/snapshot awal' };
         }
 
-        // LANGKAH 2: Kirim Request Update ke Livewire API
+        // 3. LANGKAH 2: POST KE LIVEWIRE (Cookie & Token sudah tersinkronisasi otomatis)
         const payload = {
             _token: csrfToken,
             components: [{
-                snapshot: rawSnapshot, // Gunakan snapshot SEGAR dari langkah 1
-                updates: { market: String(marketId) }, // Pastikan ID market string
+                snapshot: rawSnapshot,
+                updates: { market: String(marketId) },
                 calls: []
             }]
         };
 
-        const updateRes = await axios.post(`${fixedBase}/livewire/update`, payload, {
+        const updateRes = await client.post(`${fixedBase}/livewire/update`, payload, {
             headers: {
                 'Content-Type': 'application/json',
                 'X-Requested-With': 'XMLHttpRequest',
-                'Accept': 'application/json'
-            },
-            timeout: 15000
+                'Accept': 'application/json',
+                'Referer': `${fixedBase}/data-keluaran?market=${marketId}` // Header wajib!
+            }
         });
 
-        // LANGKAH 3: Parse HTML dari Response Update
+        // 4. PARSE HTML DARI RESPONSE UPDATE
         const htmlContent = updateRes.data.components[0].effects.html;
         const $ = cheerio.load(htmlContent);
         const results = [];
 
-        // Selector EKSKLUSIF berdasarkan Response JSON yang kamu kirim
         $('div.flex.overflow-hidden.border.rounded-lg').each((i, el) => {
             const cols = $(el).find('div');
             
-            // Validasi struktur kolom (Pasaran, Hari, Tanggal, Prize, Jam)
             if (cols.length >= 5) {
-                // EKSTRAK PRIZE: Wajib cari tag <b> secara langsung
+                // Ekstrak Prize via tag <b> sesuai struktur HTML Livewire
                 let prize = $(cols[3]).find('b').text().trim();
                 
-                // Fallback jika tag <b> kosong/rusak
+                // Fallback regex jika tag <b> kosong/rusak
                 if (!prize || prize.length !== 4) {
                     const match = $(cols[3]).text().match(/\d{4}/);
                     prize = match ? match[0] : '';
@@ -112,7 +116,6 @@ async function scrapeSite(baseUrl, marketId) {
                 let day = $(cols[1]).text().trim().toLowerCase().replace(/\s+/g, '');
                 let date = $(cols[2]).text().trim().toLowerCase().replace(/\s+/g, '');
 
-                // Hanya simpan data yang lengkap dan valid
                 if (day && date && prize && prize.length === 4) {
                     results.push({ day, date, prize });
                 }
@@ -124,7 +127,7 @@ async function scrapeSite(baseUrl, marketId) {
     } catch (err) {
         return { 
             success: false, 
-            error: err.code === 'ECONNABORTED' ? 'Timeout' : err.message 
+            error: err.response?.status === 419 ? 'CSRF Expired/Cookie Invalid' : err.message 
         };
     }
 }
@@ -151,7 +154,7 @@ app.get('/scan-chain', async (req, res) => {
         });
     }
 
-    console.log(` Chain Scan Started | ${urls.length} sites → ${chainPairs.length} links × 64 markets`);
+    console.log(`🔗 Chain Scan Started | ${urls.length} sites → ${chainPairs.length} links × 64 markets`);
     const startTime = Date.now();
     const allIssues = [];
 
@@ -256,4 +259,4 @@ app.get('/scan-chain', async (req, res) => {
 app.get('/', (req, res) => res.json({ message: '⛓️ Final Fixed Chain Comparator API Ready!' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`🔥 Server running on port ${PORT}`));
+app.listen(PORT, () => console.log(` Server running on port ${PORT}`));
