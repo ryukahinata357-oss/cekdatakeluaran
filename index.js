@@ -376,14 +376,29 @@ function validateWithMajorityVote(canonicalMarketName, siteResults, siteUrls) {
 // ==========================================
 // ENDPOINT UTAMA: /scan-final
 // ==========================================
+// ==========================================
+// ENDPOINT UTAMA: /scan-final (UPDATED FOR 25 SITES)
+// ==========================================
 app.get('/scan-final', async (req, res) => {
-    // Di dalam app.get('/scan-final', ...)
-const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, req.query.url5]
-    .filter(Boolean)
-    .map(u => u.trim()); // <--- TAMBAHKAN .trim() DI SINI!
+    // LOGIKA BARU: Ambil semua query params yang berawalan 'url'
+    // Ini membuat sistem otomatis support url1 s/d url25+ tanpa edit kode lagi
+    const urls = Object.keys(req.query)
+        .filter(key => key.startsWith('url'))
+        .map(key => req.query[key])
+        .filter(Boolean)       // Hapus yang kosong/null
+        .map(u => u.trim());   // Hapus spasi depan/belakang
     
     if (urls.length < 2) {
         return res.status(400).json({ status: 'error', message: 'Minimal 2 URL diperlukan (?url1=...&url2=...)' });
+    }
+
+    // Opsional: Batasi maksimal 25 untuk keamanan server
+    const MAX_LIMIT = 25;
+    if (urls.length > MAX_LIMIT) {
+        return res.status(400).json({ 
+            status: 'error', 
+            message: `Maksimal ${MAX_LIMIT} situs. Anda memasukkan ${urls.length}.` 
+        });
     }
 
     console.log(` Silent Auto-Correct Scan Started | ${urls.length} sites × 64 markets`);
@@ -391,9 +406,10 @@ const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, re
     const allIssues = [];
 
     // LANGKAH 0: DETEKSI MAPPING UNTUK SETIAP SITUS
-    console.log(` 🔍 Detecting market fingerprints...`);
+    console.log(` 🔍 Detecting market fingerprints for ${urls.length} sites...`);
     const siteMappings = {};
     
+    // Deteksi dilakukan berurutan agar tidak spam request ke target sekaligus saat init
     for (const url of urls) {
         const domain = getDomainName(url);
         const mapping = await detectAndFixMapping(url);
@@ -410,14 +426,15 @@ const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, re
             urls.map(url => {
                 const domain = getDomainName(url);
                 const mapping = siteMappings[domain];
-                return scrapeSite(url, market.id, mapping, siteMappings); // Pass allSiteMappings untuk referensi
+                return scrapeSite(url, market.id, mapping, siteMappings);
             })
         );
 
-        // Validasi bersih (tanpa laporan swapped)
+        // Validasi bersih
         const marketIssues = validateWithMajorityVote(market.name, siteResults, urls);
         allIssues.push(...marketIssues);
         
+        // Delay tetap diperlukan agar IP Railway tidak diblokir LiteSpeed
         await new Promise(r => setTimeout(r, 1200));
     }
 
@@ -432,7 +449,7 @@ const urls = [req.query.url1, req.query.url2, req.query.url3, req.query.url4, re
             total_issues_found: allIssues.length,
             is_fully_synced: allIssues.length === 0
         },
-        errors: allIssues // HANYA BERISI MISSING, MISMATCH, FAILED
+        errors: allIssues
     });
 });
 
